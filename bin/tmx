@@ -1,0 +1,1171 @@
+#!/bin/zsh
+# tmx -- one tmux session per work directory, on a remote machine.
+#
+# Installed on both machines: on the client it forwards itself over ssh, on the
+# remote it does the work. Run `tmx help cmds` for usage.
+#
+# Several things here look odd on purpose. The tmux and zsh behaviour that forces
+# them is documented in docs/gotchas.md; read that before simplifying anything.
+
+emulate -L zsh
+setopt pipe_fail extended_glob
+zmodload zsh/datetime
+
+# --- Settings file ---------------------------------------------------
+# Precedence: environment, then this file, then the defaults below.
+# Parsed against a key list rather than sourced, so the file cannot execute
+# anything. Builtins only: it runs before PATH is set up.
+: ${TMX_CONFIG_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/tmx}
+
+typeset -ga TMX_CONFIG_KEYS=(
+  TMX_REMOTE_HOST TMX_REMOTE_NAME TMX_REMOTE_BIN TMX_ROLE
+  TMX_PATH_PREPEND TMX_AI_CMD TMX_WORKTREE_DIRNAME
+  TMX_PROJECTS_FILE TMX_DOCS_DIR TMX_CLIP_FILE TMX_CLIP_REMOTE_FILE TMX_GLYPHS
+)
+
+load_config() {
+  local file=$TMX_CONFIG_DIR/config
+  [[ -r $file ]] || return 0
+  local line key val
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%%\#*}
+    line=${line##[[:space:]]##}
+    line=${line%%[[:space:]]##}
+    [[ -n $line && $line == *=* ]] || continue
+    key=${line%%=*}; key=${key%%[[:space:]]##}
+    val=${line#*=};  val=${val##[[:space:]]##}
+    [[ $val == \"*\" || $val == \'*\' ]] && val=${val[2,-2]}
+    # Fixed list, plus any TMX_AI_<agent> key: agents are user-defined, so their
+    # names cannot be known in advance.
+    if ! (( ${TMX_CONFIG_KEYS[(Ie)$key]} )); then
+      [[ $key == TMX_AI_[A-Za-z0-9_]## ]] || continue
+    fi
+    [[ -n ${(P)key-} ]] && continue          # already set in the environment
+    typeset -g $key=$val
+  done < $file
+  return 0
+}
+load_config
+
+# --- PATH ------------------------------------------------------------
+# `ssh host command` reads only ~/.zshenv, so tmux/fzf/git can look uninstalled.
+# Set PATH here rather than trusting a dotfile. Default suits MacPorts; override
+# TMX_PATH_PREPEND for anything else.
+: ${TMX_PATH_PREPEND:=/opt/local/bin:/opt/local/sbin}
+typeset -U path
+path=( ${(s.:.)TMX_PATH_PREPEND} $HOME/.local/bin /usr/bin /bin /usr/sbin /sbin $path )
+
+# --- Configuration (override in the environment or the config file) ---
+: ${TMX_REMOTE_HOST:=tmx-remote}      # ssh host alias for the remote
+: ${TMX_REMOTE_NAME:=tmx-remote}      # what `hostname -s` prints there
+: ${TMX_PROJECTS_FILE:=$TMX_CONFIG_DIR/projects}
+: ${TMX_DOCS_DIR:=$TMX_CONFIG_DIR/docs}
+: ${TMX_WORKTREE_DIRNAME:=.worktrees}
+: ${TMX_ROLE:=}                       # "remote" forces remote behaviour
+: ${TMX_REMOTE_BIN:=~/.local/bin/tmx} # path to tmx on the remote
+
+# --- AI agents --------------------------------------------------------
+# An agent's command defaults to its own name, so --ai=codex needs no config.
+# TMX_AI_<agent> overrides it; names are [A-Za-z0-9_] because a name is also a
+# tmux window name and part of a variable name.
+: ${TMX_AI_DEFAULT:=claude}
+
+# Kept as an explicit override for the default agent's command line.
+: ${TMX_AI_CMD:=}
+
+# Escape hatch for selections too large for OSC 52, which truncates them.
+# Written on the remote, fetched over ssh. See cmd_clip.
+: ${TMX_CLIP_FILE:=$HOME/.cache/tmx/clip.txt}
+: ${TMX_CLIP_REMOTE_FILE:='~/.cache/tmx/clip.txt'}   # as the remote's shell sees it
+
+# Directory names never offered by the picker, in any root.
+typeset -ga TMX_BLOCKLIST=(
+  Library Applications Desktop Downloads Documents
+  Music Movies Pictures Public Sites
+)
+
+typeset -g TMX_SELF=${0:A}
+typeset -g TAB=$'\t'
+
+# Bump when behaviour changes. `tmx version` reports the copy on BOTH machines,
+# because every message you see comes from the remote's copy -- updating the
+# laptop's only changes the ssh-forwarding line.
+typeset -g TMX_VERSION='2026-08-06.2'
+
+# Set by resolve_target.
+typeset -g TMX_KIND=''
+typeset -g TMX_KEY=''
+
+# Set by main() from a --ai anywhere in the arguments. Sessions are shell-only
+# unless you ask for the AI window.
+typeset -gi TMX_WANT_AI=0
+typeset -g TMX_AI_AGENT=''
+
+# Set by resolve_target when an alias matched, so the session takes the alias
+# name instead of the name derived from the path.
+typeset -g TMX_ALIAS=''
+
+# --- Small helpers ---------------------------------------------------
+die()  { print -u2 -r -- "tmx: $*"; exit 1 }
+warn() { print -u2 -r -- "tmx: $*" }
+have() { (( $+commands[$1] )) }
+
+# Hash the file as well as the version marker, so a copy that changed without a
+# version bump still shows as out of sync.
+self_fingerprint() {
+  local h=''
+  h=$(md5 -q "$TMX_SELF" 2>/dev/null) \
+    || h=$(shasum -a 256 "$TMX_SELF" 2>/dev/null | cut -d' ' -f1) \
+    || h=''
+  print -r -- ${h[1,8]}
+}
+
+# Agent name -> the command line to run for it.
+ai_command_for() {
+  # Two statements: a declaration cannot use a name it assigns itself.
+  local name=$1
+  local var="TMX_AI_${name}"
+  # An explicit TMX_AI_CMD overrides the default agent only.
+  if [[ $name == $TMX_AI_DEFAULT && -n $TMX_AI_CMD ]]; then
+    print -r -- $TMX_AI_CMD
+    return 0
+  fi
+  if [[ -n ${(P)var-} ]]; then
+    print -r -- ${(P)var}
+    return 0
+  fi
+  print -r -- $name
+}
+
+# Is this the remote? Three ways to say yes, cheapest first. The marker
+# file is written at install time, so role detection never has to trust
+# whatever macOS is reporting as the hostname today.
+is_remote() {
+  [[ $TMX_ROLE == remote ]] && return 0
+  [[ -e $TMX_CONFIG_DIR/remote ]] && return 0
+  local h=${$(hostname -s 2>/dev/null):l}
+  [[ -n $h && $h == ${TMX_REMOTE_NAME:l} ]]
+}
+
+# --- Name slugs ------------------------------------------------------
+# One path component -> one safe name fragment. Case is preserved, so names
+# match what is on disk.
+sanitize_part() {
+  local s=$1
+  # Punctuation except - and _ becomes a dash, so a name is always typeable
+  # unquoted; tmx prints session names as commands to run. Letters are left
+  # alone in any script.
+  s=${s//[\!\"\#\$%\&\'()*+,.\/:\;\<=\>?@\[\\\]^\`{|}~[:space:]]/-}
+  while [[ $s == *--* ]]; do s=${s//--/-}; done
+  s=${s##-}; s=${s%%-}
+  print -r -- $s
+}
+
+# Directory -> session name.
+#   ~/code/api        -> code-api
+#   ~/oss/api         -> oss-api
+#   ~/code/acme/api -> acme-api
+#   ~/dotfiles        -> dotfiles      (directly under $HOME: no prefix)
+slug_for_dir() {
+  local dir=${1:A} home=${HOME:A}
+  if [[ $dir == $home ]]; then
+    print -r -- home
+    return
+  fi
+  local base=${dir:t} parent=${dir:h}
+  if [[ $parent == $home ]]; then
+    sanitize_part $base
+  else
+    print -r -- "$(sanitize_part ${parent:t})-$(sanitize_part $base)"
+  fi
+}
+
+# --- Roots -----------------------------------------------------------
+# The projects file holds both halves of "where is my work, and what do I call it":
+#
+#   a line without "="   a root, whose children the picker offers
+#   a line with "="      name = path, an alias that names the session
+#
+# Split on the first "=", unless what precedes it looks like a path, so a
+# directory whose name contains "=" is still read as a root.
+load_projects() {
+  typeset -ga TMX_ROOTS=()
+  typeset -gA TMX_ALIASES=()
+
+  local file=$TMX_PROJECTS_FILE
+  if [[ ! -r $file ]]; then
+    # Older installs called this file "roots" and held only roots.
+    local legacy=$TMX_CONFIG_DIR/roots
+    if [[ -r $legacy ]]; then
+      warn "using $legacy; rename it to $file, it now takes aliases too"
+      file=$legacy
+    else
+      warn "no projects file at $file -- only live sessions will be listed"
+      return 0
+    fi
+  fi
+
+  local line name dir
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%%\#*}
+    line=${line##[[:space:]]##}
+    line=${line%%[[:space:]]##}
+    [[ -n $line ]] || continue
+
+    name=${line%%=*}; name=${name%%[[:space:]]##}
+    if [[ $line == *=* && $name != */* && $name != '~'* ]]; then
+      dir=${line#*=}; dir=${dir##[[:space:]]##}
+      [[ -n $name && -n $dir ]] || continue
+      if [[ $name != [A-Za-z0-9_-]## ]]; then
+        warn "alias '$name' skipped: names may only use letters, digits, - and _"
+        continue
+      fi
+      dir=${~dir}
+      TMX_ALIASES[$name]=${dir:A}
+    else
+      line=${~line}
+      [[ -d $line ]] && TMX_ROOTS+=( ${line:A} )
+    fi
+  done < $file
+  return 0
+}
+
+is_root() {
+  local d=${1:A} r
+  for r in $TMX_ROOTS; do
+    [[ $d == $r ]] && return 0
+  done
+  return 1
+}
+
+is_blocked() {
+  local n=$1 b
+  [[ $n == .* ]] && return 0
+  for b in $TMX_BLOCKLIST; do
+    [[ $n == $b ]] && return 0
+  done
+  return 1
+}
+
+# Every candidate work dir: each root, one level deep, minus the
+# blocklist, minus any child that is itself a root ("deeper root wins").
+list_dirs() {
+  load_projects
+  local root d
+  local -A seen
+  for root in $TMX_ROOTS; do
+    # (N-/) not (N/): the trailing dash follows symlinks, so a root full of
+    # symlinks-to-directories is listed instead of coming back empty.
+    for d in $root/*(N-/); do
+      is_blocked ${d:t} && continue
+      is_root $d && continue
+      # A newline would reach the read-loops as two lines, the second a relative
+      # path. Not offered here; `tmx <path>` still opens it.
+      [[ $d == *$'\n'* ]] && continue
+      [[ -n ${seen[${d:A}]-} ]] && continue
+      seen[${d:A}]=1
+      print -r -- ${d:A}
+    done
+  done
+  return 0
+}
+
+# --- Session queries -------------------------------------------------
+# name TAB dir TAB attached TAB activity TAB created TAB session_path
+list_sessions() {
+  tmux list-sessions -F \
+    "#{session_name}${TAB}#{@tmx_dir}${TAB}#{session_attached}${TAB}#{session_activity}${TAB}#{session_created}${TAB}#{session_path}" \
+    2>/dev/null || true
+}
+
+session_exists() { tmux has-session -t="$1" 2>/dev/null }
+
+# Bare "$1" is required: show-options reads "=$1" as a pane target and returns
+# empty. A bare name prefix-matches, so callers must first establish that the
+# exact session exists. See docs/gotchas.md.
+session_opt() {
+  tmux show-options -qv -t "$1" "$2" 2>/dev/null || true
+}
+
+# Which live session, if any, already owns this directory? Names can differ from
+# the derived one (an alias, or a hand-renamed session), so the directory is the
+# only reliable identity.
+session_for_dir() {
+  local want=${1:A} n d rest
+  while IFS=$TAB read -r n d rest; do
+    [[ -n $n && -n $d ]] || continue
+    [[ ${d:A} == $want ]] && { print -r -- $n; return 0 }
+  done < <(list_sessions)
+  return 1
+}
+
+session_dir() {
+  local d=$(session_opt "$1" @tmx_dir)
+  if [[ -z $d ]]; then
+    # Trailing colon required: display-message -t "=name" is a pane target and
+    # comes back empty, while "=name:" resolves the session's current pane.
+    d=$(tmux display-message -p -t "=${1}:" '#{session_path}' 2>/dev/null) || d=''
+  fi
+  print -r -- $d
+}
+
+# --- Session creation ------------------------------------------------
+# Window 1 "shell": plain zsh in the work dir, focused on attach.
+# Window 2 "ai":    Claude Code in the work dir. Only with --ai.
+create_session() {
+  local name=$1 dir=$2 is_wt=${3:-0}
+
+  tmux new-session -d -s "$name" -c "$dir" -n shell || die "could not create session $name"
+
+  # Metadata that the status line and `tmx ls` read back cheaply.
+  # Bare "$name" on purpose: set-option rejects "=$name".
+  tmux set-option -t "$name" @tmx_dir "$dir"
+  tmux set-option -t "$name" @tmx_worktree "$is_wt"
+
+  (( TMX_WANT_AI )) && add_ai_window "$name" "$dir" "$TMX_AI_AGENT"
+
+  # ${name} MUST stay braced. Unbraced, zsh reads the ":s" of ":shell" as a
+  # history modifier and dies with "bad substitution" -- which is exactly the
+  # bug that made session creation fail. Brace anything followed by a colon.
+  tmux select-window -t "=${name}:shell" || warn "could not focus the shell window"
+}
+
+# $1 session, $2 window name. Windows are named after the agent, so two agents
+# can coexist while repeating one is a no-op.
+ai_window_exists() {
+  local w
+  for w in ${(f)"$(tmux list-windows -t "=$1" -F '#{window_name}' 2>/dev/null || true)"}; do
+    [[ $w == $2 ]] && return 0
+  done
+  return 1
+}
+
+# $1 session, $2 work dir, $3 agent name. Never fatal: shell-only is a valid
+# session, so a failed optional window must not tear anything down.
+add_ai_window() {
+  local name=$1 dir=${2-} agent=${3:-$TMX_AI_DEFAULT}
+
+  # The window is named after the agent, so `tmx ls` tells you which one is in
+  # there and two different agents can share a session.
+  ai_window_exists "$name" "$agent" && return 0
+
+  local agent_cmd=$(ai_command_for "$agent")
+  # Only a warning: the window runs through a LOGIN shell, whose PATH is richer
+  # than this script's, so a command missing here may still resolve there.
+  have ${agent_cmd%% *} \
+    || warn "agent '$agent' runs '${agent_cmd%% *}', which is not on tmx's PATH -- if the window closes at once, that is why"
+
+  # A live session reached by name may not resolve to a directory. Drop -c
+  # rather than passing an empty one, which tmux rejects.
+  local -a where=()
+  [[ -n $dir && -d $dir ]] && where=( -c "$dir" )
+
+  # A login shell, so PATH matches what you get by hand. ${(q)} keeps an agent
+  # command containing spaces or quotes as one argument.
+  local login_shell=${SHELL:-/bin/zsh}
+  local ai_window_cmd="exec ${login_shell} -lc ${(q)agent_cmd}"
+
+  # -d so it never steals focus. Index 2 first, so the agent sits right after
+  # the shell whenever that index is free.
+  tmux new-window -d -t "=${name}:2" -n "$agent" "${where[@]}" "$ai_window_cmd" 2>/dev/null && return 0
+
+  # Index 2 is a window you opened yourself. Append instead of renumbering
+  # your windows out from under you.
+  tmux new-window -d -t "=$name" -n "$agent" "${where[@]}" "$ai_window_cmd" && return 0
+
+  warn "could not create the '$agent' window; the session is otherwise fine"
+  return 1
+}
+
+# The one place that decides create vs attach vs switch.
+open_dir() {
+  local dir=${1:A} is_wt=${2:-0} name
+  [[ -d $dir ]] || die "not a directory: $dir"
+  if [[ -n $TMX_ALIAS ]]; then
+    name=$TMX_ALIAS
+  else
+    name=$(slug_for_dir $dir)
+  fi
+  [[ -n $name ]] || die "could not derive a session name from $dir"
+  open_named "$name" "$dir" "$is_wt"
+}
+
+open_named() {
+  local name=$1 dir=$2 is_wt=${3:-0}
+
+  # One session per directory, whatever it happens to be called. An alias, the
+  # derived name and a bare path all have to land in the same session, or you get
+  # two sessions on one working tree.
+  local owner=''
+  owner=$(session_for_dir "$dir") || owner=''
+  if [[ -n $owner && $owner != "$name" ]]; then
+    print -r -- "tmx: ${dir/#$HOME/~} is already open as '$owner'"
+    (( TMX_WANT_AI )) && add_ai_window "$owner" "$dir" "$TMX_AI_AGENT"
+    attach "$owner"
+    return 0
+  fi
+
+  if session_exists "$name"; then
+    # Collision guard: same name, different directory means the slug rule
+    # produced an ambiguous name. Refuse rather than drop you into the
+    # wrong place, and print both paths so it is obvious what happened.
+    local existing=$(session_dir "$name")
+    if [[ -n $existing && ${existing:A} != ${dir:A} ]]; then
+      print -u2 -r -- "tmx: session name '$name' is already taken"
+      print -u2 -r -- "  existing: $existing"
+      print -u2 -r -- "  wanted:   $dir"
+      print -u2 -r -- "Rename one of the directories, or attach to the existing one: tmx $name"
+      exit 1
+    fi
+    # --ai on a session that is already running adds the window rather than
+    # doing nothing. This is the only case where tmx touches an existing
+    # session's layout, and it is additive.
+    (( TMX_WANT_AI )) && add_ai_window "$name" "${existing:-$dir}" "$TMX_AI_AGENT"
+  else
+    create_session "$name" "$dir" "$is_wt"
+  fi
+
+  attach "$name"
+}
+
+# Inside tmux, switch the client; outside, attach. Never `-d`, so the
+# remote's own screen is never kicked off -- both clients stay mirrored.
+attach() {
+  local name=$1
+  if [[ -n ${TMUX-} ]]; then
+    tmux switch-client -t "=$name"
+  else
+    tmux attach-session -t "=$name"
+  fi
+}
+
+# --- Resolving an argument -------------------------------------------
+# A path, a live session name, or a dir basename the picker would offer.
+# Sets TMX_KIND and TMX_KEY.
+resolve_target() {
+  local arg=$1 d
+
+  if [[ -d $arg ]]; then
+    TMX_KIND=dir; TMX_KEY=${arg:A}
+    return 0
+  fi
+
+  # Aliases win over a same-named live session on purpose: an alias should always
+  # mean its directory, and the directory guard in open_named then attaches to
+  # whatever session already owns it.
+  load_projects
+  if [[ -n ${TMX_ALIASES[$arg]-} ]]; then
+    local target=${TMX_ALIASES[$arg]}
+    [[ -d $target ]] || die "alias '$arg' points at $target, which is not a directory"
+    TMX_KIND=dir; TMX_KEY=$target; TMX_ALIAS=$arg
+    return 0
+  fi
+
+  if session_exists "$arg"; then
+    TMX_KIND=session; TMX_KEY=$arg
+    return 0
+  fi
+
+  # read, not `for d in $(...)`: zsh splits command substitution on IFS, which
+  # breaks paths containing spaces. Process substitution also keeps the loop in
+  # this shell, so the assignments and the early return work.
+  while IFS= read -r d; do
+    [[ -n $d ]] || continue
+    if [[ $(slug_for_dir "$d") == $arg || ${d:t} == $arg ]]; then
+      TMX_KIND=dir; TMX_KEY=$d
+      return 0
+    fi
+  done < <(list_dirs)
+
+  return 1
+}
+
+# When an argument does not resolve, say why and offer the real names. The most
+# common cause is asking for a ROOT (`tmx acme`) -- roots hold work dirs, they
+# are not work dirs themselves, so they never become sessions.
+explain_no_match() {
+  local arg=$1
+  local -a all matches kids
+  local n d r rt rslug
+
+  load_projects
+
+  for r in $TMX_ROOTS; do
+    rt=${r:t}
+    rslug=$(slug_for_dir $r)
+    if [[ ${rt:l} == ${arg:l} || ${rslug:l} == ${arg:l} ]]; then
+      print -u2 -r -- ""
+      print -u2 -r -- "'${arg}' is a ROOT in ${TMX_PROJECTS_FILE}, not a work dir."
+      print -u2 -r -- "Roots contain sessions; they are not sessions themselves."
+      kids=( ${r}/*(N/) )
+      if (( ${#kids} )); then
+        print -u2 -r -- ""
+        print -u2 -r -- "What lives under it:"
+        for d in $kids; do
+          is_blocked ${d:t} && continue
+          is_root $d && continue
+          print -u2 -r -- "  tmx $(slug_for_dir $d)"
+        done
+      fi
+      print -u2 -r -- ""
+      print -u2 -r -- "To make the root itself a session, either open it by path:"
+      print -u2 -r -- "  tmx ${r/#$HOME/~}"
+      print -u2 -r -- "or drop that line from ${TMX_PROJECTS_FILE}, which makes it"
+      print -u2 -r -- "a plain work dir under its parent instead."
+      return
+    fi
+  done
+
+  all=( ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"} )
+  # read, not `for d in $(...)`: see resolve_target. A dir with a space in its
+  # name was being offered here as two bogus half-names.
+  while IFS= read -r d; do
+    [[ -n $d ]] || continue
+    all+=( $(slug_for_dir "$d") )
+  done < <(list_dirs)
+
+  for n in $all; do
+    [[ ${n:l} == *${arg:l}* ]] && matches+=( $n )
+  done
+
+  print -u2 -r -- ""
+  if (( ${#matches} )); then
+    print -u2 -r -- "Did you mean:"
+    for n in ${matches[1,10]}; do print -u2 -r -- "  tmx $n"; done
+  elif (( ${#all} )); then
+    print -u2 -r -- "Known names:"
+    for n in ${all[1,12]}; do print -u2 -r -- "  tmx $n"; done
+    (( ${#all} > 12 )) && print -u2 -r -- "  ... and $(( ${#all} - 12 )) more -- run: tmx"
+  else
+    print -u2 -r -- "No sessions and no work dirs found. Check ${TMX_PROJECTS_FILE}."
+  fi
+}
+
+open_resolved() {
+  case $TMX_KIND in
+    session)
+      # A live session reached by name skips open_named entirely, so --ai has to
+      # be honoured here too. Otherwise `tmx --ai <session>`, the obvious way to
+      # add Claude Code to something already running, would silently do nothing.
+      (( TMX_WANT_AI )) && add_ai_window "$TMX_KEY" "$(session_dir "$TMX_KEY")" "$TMX_AI_AGENT"
+      attach "$TMX_KEY"
+      ;;
+    dir)     open_dir "$TMX_KEY" ;;
+    *)       die "internal error: unknown target kind '$TMX_KIND'" ;;
+  esac
+}
+
+# --- Times -----------------------------------------------------------
+# Seconds -> compact duration. Same rules as the status line.
+rel_time() {
+  local -i s=$1 m h d
+  (( s < 0 )) && s=0
+  if (( s < 60 )); then print -- "${s}s"; return; fi
+  m=$(( s / 60 ))
+  if (( m < 60 )); then print -- "${m}m"; return; fi
+  h=$(( m / 60 )); m=$(( m % 60 ))
+  if (( h < 24 )); then print -- "${h}h${m}m"; return; fi
+  d=$(( h / 24 )); h=$(( h % 24 ))
+  print -- "${d}d${h}h"
+}
+
+rel_or_attached() {
+  local att=$1 act=$2
+  if [[ -n $att && $att != 0 ]]; then
+    print -- "attached"
+  else
+    print -- "$(rel_time $(( EPOCHSECONDS - act ))) ago"
+  fi
+}
+
+git_branch_of() {
+  local dir=$1 b=''
+  [[ -n $dir && -d $dir ]] || return 0
+  b=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+    || b=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null) \
+    || b=''
+  print -r -- $b
+}
+
+# --- Subcommand: wt --------------------------------------------------
+# One session per branch.
+#   tmx wt feat/1234                        (from inside the repo)
+#   tmx wt feat/1234 ~/code/globex/mono
+cmd_wt() {
+  local branch=${1-} repo=${2:-$PWD}
+  [[ -n $branch ]] || die "usage: tmx wt <branch> [repo-dir]"
+  have git || die "git not found"
+
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || die "$repo is not inside a git repository"
+
+  # The main repo root, even from inside another worktree. --git-common-dir is
+  # relative in the main tree and absolute in a linked one, so normalise it.
+  local top common main_root
+  top=$(git -C "$repo" rev-parse --show-toplevel) || die "could not find the repo root"
+  common=$(git -C "$top" rev-parse --git-common-dir) || die "could not find the git dir"
+  [[ $common == /* ]] || common="$top/$common"
+  main_root=${${common:A}:h}
+
+  local repo_slug branch_slug wt_dir name
+  repo_slug=$(slug_for_dir $main_root)
+  branch_slug=$(sanitize_part $branch)
+  [[ -n $branch_slug ]] || die "branch name '$branch' does not produce a usable session name"
+  name="${repo_slug}--${branch_slug}"
+
+  # <repo-parent>/.worktrees/<repo>--<branch>
+  # The repo name is in the leaf so two repos under the same parent
+  # branching the same name do not collide on one path.
+  wt_dir="${main_root:h}/${TMX_WORKTREE_DIRNAME}/${main_root:t}--${branch_slug}"
+
+  if [[ -d $wt_dir ]]; then
+    # The path comes from a sanitised branch name, so two branches can map to
+    # it. Verify it really is a worktree for THIS branch before reusing it.
+    if ! git -C "$wt_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      die "$wt_dir already exists and is not a git worktree.
+Move it aside, or pick a branch name that does not sanitise to '${branch_slug}'."
+    fi
+
+    local wt_head=''
+    wt_head=$(git -C "$wt_dir" symbolic-ref --quiet --short HEAD 2>/dev/null) || wt_head=''
+
+    if [[ -z $wt_head ]]; then
+      die "the worktree at $wt_dir has a detached HEAD, so it cannot be reused for '$branch'.
+Check it out onto a branch, or remove it: git worktree remove ${wt_dir}"
+    fi
+
+    if [[ $wt_head != "$branch" ]]; then
+      die "the worktree path for '$branch' is already used by branch '$wt_head'.
+  path: $wt_dir
+Both branch names sanitise to '${branch_slug}', which is what makes them collide.
+Rename one branch, or remove that worktree: git worktree remove ${wt_dir}"
+    fi
+  else
+    mkdir -p ${wt_dir:h} || die "could not create ${wt_dir:h}"
+    if git -C "$main_root" show-ref --verify --quiet "refs/heads/$branch"; then
+      print -r -- "tmx: adding a worktree for existing branch $branch"
+      git -C "$main_root" worktree add "$wt_dir" "$branch" || die "git worktree add failed"
+    else
+      print -r -- "tmx: creating branch $branch and its worktree"
+      git -C "$main_root" worktree add -b "$branch" "$wt_dir" || die "git worktree add failed"
+    fi
+  fi
+
+  open_named "$name" "${wt_dir:A}" 1
+}
+
+# --- Subcommand: ls --------------------------------------------------
+# Every window of every session in ONE tmux call, rather than one call per
+# session. Fills two lookups:
+#   TMX_WIN_COMPACT[session] -> "1:shell* 2:ai"        for the default table
+#   TMX_WIN_ROWS[session]    -> one "idx name flag TAB cmd" line per window
+load_windows() {
+  typeset -gA TMX_WIN_COMPACT=() TMX_WIN_ROWS=()
+  local s idx wname wactive wcmd flag
+  while IFS=$TAB read -r s idx wname wactive wcmd; do
+    [[ -n $s ]] || continue
+
+    # Some agents ship as a version-numbered binary, so pane_current_command
+    # reads like "2.1.222". The window name is the agent name. If the pattern
+    # ever stops matching, the raw name shows instead; nothing breaks.
+    if [[ $wcmd == [0-9]*.[0-9]* ]]; then
+      wcmd=$wname
+    fi
+
+    if [[ $wactive == 1 ]]; then flag='*'; else flag=' '; fi
+
+    if [[ -n ${TMX_WIN_COMPACT[$s]-} ]]; then
+      TMX_WIN_COMPACT[$s]="${TMX_WIN_COMPACT[$s]} ${idx}:${wname}${flag% }"
+    else
+      TMX_WIN_COMPACT[$s]="${idx}:${wname}${flag% }"
+    fi
+    TMX_WIN_ROWS[$s]="${TMX_WIN_ROWS[$s]-}  ${idx} ${wname} ${flag}${TAB}${wcmd}"$'\n'
+  done < <(tmux list-windows -a \
+    -F "#{session_name}${TAB}#{window_index}${TAB}#{window_name}${TAB}#{window_active}${TAB}#{pane_current_command}" \
+    2>/dev/null || true)
+  return 0
+}
+
+cmd_ls() {
+  local -a rows
+  local name dir att act cre spath branch wt wtflag
+  integer tree=0
+
+  local a
+  for a in "$@"; do
+    case $a in
+      -w|--windows) tree=1 ;;
+      *) die "tmx ls: unknown option '$a' (only -w / --windows)" ;;
+    esac
+  done
+
+  load_windows
+
+  while IFS=$TAB read -r name dir att act cre spath; do
+    [[ -n $dir ]] || dir=$spath
+    branch=$(git_branch_of "$dir")
+    [[ -n $branch ]] || branch='-'
+    wt=$(session_opt "$name" @tmx_worktree)
+    if [[ $wt == 1 ]]; then wtflag=wt; else wtflag='-'; fi
+    rows+=( "${name}${TAB}${dir/#$HOME/~}${TAB}${branch}${TAB}${wtflag}${TAB}$(rel_or_attached "$att" "$act")${TAB}$(rel_time $(( EPOCHSECONDS - cre )))${TAB}${TMX_WIN_COMPACT[$name]-}" )
+  done < <(list_sessions)
+
+  # Nothing running. Do not stop at "no sessions" -- show what can be started,
+  # and if that is empty too, show why, since a root that does not exist on disk
+  # is skipped without comment.
+  if (( ${#rows} == 0 )); then
+    local -a dirs=()
+    local d r
+    while IFS= read -r d; do
+      [[ -n $d ]] && dirs+=( $d )
+    done < <(list_dirs)
+
+    print -- "No sessions running."
+    if (( ${#dirs} )); then
+      print -- ""
+      print -- "${#dirs} work dir(s) available -- run 'tmx' to pick one, or:"
+      for d in ${dirs[1,8]}; do
+        print -- "  tmx $(slug_for_dir $d)"
+      done
+      (( ${#dirs} > 8 )) && print -- "  ... and $(( ${#dirs} - 8 )) more"
+    else
+      print -- ""
+      print -- "No work dirs found either. Roots in $TMX_PROJECTS_FILE:"
+      load_projects
+      if [[ -r $TMX_PROJECTS_FILE ]]; then
+        while IFS= read -r r || [[ -n $r ]]; do
+          r=${r%%\#*}
+          r=${r##[[:space:]]##}
+          r=${r%%[[:space:]]##}
+          [[ -z $r ]] && continue
+          local expanded=${~r}
+          if [[ -d $expanded ]]; then
+            print -- "  $r  -- exists, but nothing eligible one level down"
+          else
+            print -- "  $r  -- DOES NOT EXIST on this machine, skipped"
+          fi
+        done < $TMX_PROJECTS_FILE
+      else
+        print -- "  (file is missing or unreadable)"
+      fi
+    fi
+    return 0
+  fi
+
+  if (( tree )); then
+    # Window lines carry two fields, so column -t aligns them under DIR with no
+    # width arithmetic. awk then trims column's padding and restores the blank
+    # lines between blocks, which column discards.
+    { print -- "SESSION${TAB}DIR${TAB}BRANCH${TAB}WT${TAB}LAST ATTACHED${TAB}UP"
+      local row
+      for row in $rows; do
+        print -r -- ${row%$TAB*}          # drop the compact WINDOWS field
+        print -rn -- "${TMX_WIN_ROWS[${row%%$TAB*}]-}"
+      done
+    } | column -t -s $TAB \
+      | awk '{ sub(/[ \t]+$/, ""); if (NR > 2 && $0 !~ /^ /) print ""; print }'
+    return 0
+  fi
+
+  { print -- "SESSION${TAB}DIR${TAB}BRANCH${TAB}WT${TAB}LAST ATTACHED${TAB}UP${TAB}WINDOWS"
+    print -rl -- $rows
+  } | column -t -s $TAB
+}
+
+# --- Subcommand: kill ------------------------------------------------
+cmd_kill() {
+  local arg=${1-}
+  [[ -n $arg ]] || die "usage: tmx kill <session> | tmx kill --all"
+
+  if [[ $arg == --all || $arg == -a ]]; then
+    local -a names
+    names=( ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"} )
+    if (( ${#names} == 0 )); then
+      print -- "No sessions to kill."
+      return 0
+    fi
+    print -- "About to kill ${#names} session(s): ${names[*]}"
+    if read -q "?Really kill all of them? Anything running inside is lost. [y/N] "; then
+      print
+      tmux kill-server 2>/dev/null || true
+      print -- "All sessions killed."
+    else
+      print $'\nCancelled.'
+    fi
+    return 0
+  fi
+
+  session_exists "$arg" || die "no such session: $arg"
+  local dir=$(session_dir "$arg")
+  print -- "Session: $arg  (${dir/#$HOME/~})"
+  if read -q "?Kill it? Anything running inside is lost. [y/N] "; then
+    print
+    tmux kill-session -t "=$arg"
+    print -- "Killed $arg."
+  else
+    print $'\nCancelled.'
+  fi
+}
+
+# --- Subcommand: clip ------------------------------------------------
+# The clipboard bridge for text too big for OSC 52.
+#
+#   remote -> client   prefix Y in copy mode  (runs `tmx clip save`)
+#                       then `tmx clip` on the laptop
+#   client -> remote   `tmx clip push` on the laptop
+#                       then prefix P on the remote
+#
+# Runs on both machines and does opposite things on each, so it is dispatched
+# before the ssh-forwarding branch in main().
+human_size() {
+  local -i b=$1
+  if (( b < 1024 )); then
+    print -- "${b} B"
+  elif (( b < 1048576 )); then
+    printf '%.1f KB\n' $(( b / 1024.0 ))
+  else
+    printf '%.1f MB\n' $(( b / 1048576.0 ))
+  fi
+}
+
+cmd_clip() {
+  local sub=${1-}
+
+  # ---------------- on the remote ----------------
+  if is_remote; then
+    case $sub in
+      save)
+        # stdin is the tmux selection, piped in by copy-pipe-and-cancel.
+        mkdir -p ${TMX_CLIP_FILE:h} || die "could not create ${TMX_CLIP_FILE:h}"
+        cat > $TMX_CLIP_FILE
+        local -i n=$(wc -c < $TMX_CLIP_FILE)
+        if [[ -n ${TMUX-} ]]; then
+          tmux display-message -d 4000 \
+            "clip: saved $(human_size $n) -- on the client run: tmx clip"
+        else
+          print -- "clip: saved $(human_size $n) to $TMX_CLIP_FILE"
+        fi
+        ;;
+      ''|show)
+        if [[ -s $TMX_CLIP_FILE ]]; then
+          print -- "clip file: $TMX_CLIP_FILE  ($(human_size $(wc -c < $TMX_CLIP_FILE)))"
+          print -- "Pull it onto the client with:  tmx clip"
+        else
+          print -- "clip file is empty or missing: $TMX_CLIP_FILE"
+          print -- "Select text in copy mode and press prefix Y to fill it."
+        fi
+        ;;
+      *) die "on the remote: tmx clip [save|show]" ;;
+    esac
+    return 0
+  fi
+
+  # ---------------- on the client ----------------
+  case $sub in
+    ''|pull)
+      have pbcopy || die "pbcopy not found -- is this really macOS?"
+      local tmp
+      tmp=$(mktemp -t tmxclip) || die "could not create a temp file"
+      local ssh_err=''
+      if ! ssh_err=$(ssh "$TMX_REMOTE_HOST" "cat ${TMX_CLIP_REMOTE_FILE}" 2>&1 >$tmp); then
+        rm -f $tmp
+        # Distinguish "no selection saved" from "could not reach the remote".
+        if [[ $ssh_err == *(#i)(no such file|not found)* ]]; then
+          die "nothing saved on the remote yet -- select text there and press prefix Y"
+        fi
+        die "could not read the clip file from '${TMX_REMOTE_HOST}':
+  ${ssh_err:-(no error text)}"
+      fi
+      if [[ ! -s $tmp ]]; then
+        rm -f $tmp
+        die "the remote's clip file is empty -- press prefix Y there first"
+      fi
+      local -i n=$(wc -c < $tmp)
+      pbcopy < $tmp
+      rm -f $tmp
+      print -- "clip: $(human_size $n) now on the clipboard -- paste with Cmd-V"
+      ;;
+    push)
+      have pbpaste || die "pbpaste not found -- is this really macOS?"
+      # Derive the directory from the configured path instead of hardcoding
+      # ~/.cache/tmx, which broke the bridge for anyone who moved the file.
+      # Unquoted on purpose: the remote shell must expand the leading ~.
+      local remote_dir=${TMX_CLIP_REMOTE_FILE:h}
+      pbpaste | ssh "$TMX_REMOTE_HOST" "mkdir -p ${remote_dir} && cat > ${TMX_CLIP_REMOTE_FILE}" \
+        || die "could not write the clip file on the remote"
+      print -- "clip: clipboard pushed to the remote -- paste it there with prefix P"
+      ;;
+    scp)
+      # For when you want the file itself rather than the clipboard.
+      print -- "scp ${TMX_REMOTE_HOST}:${TMX_CLIP_REMOTE_FILE} ./clip.txt"
+      ;;
+    *) die "usage: tmx clip [pull|push|scp]" ;;
+  esac
+}
+
+# --- Subcommand: version ---------------------------------------------
+# Reports both copies, since a stale one on the remote is invisible otherwise:
+# the laptop forwards every real command, so the remote's copy is what answers.
+cmd_version() {
+  local mine="$TMX_VERSION+$(self_fingerprint)"
+  if is_remote; then
+    print -- "remote: $mine  ($TMX_SELF)"
+    return 0
+  fi
+
+  print -- "client: $mine  ($TMX_SELF)"
+  local rv
+  rv=$(ssh "$TMX_REMOTE_HOST" "\$SHELL -lc '${TMX_REMOTE_BIN} version-only'" 2>/dev/null) \
+    || rv='(could not reach the remote)'
+  [[ -z $rv ]] && rv='(no output -- an old copy, from before version support)'
+  print -- "remote: $rv  [$TMX_REMOTE_HOST]"
+  if [[ $rv == *"$mine"* ]]; then
+    print -- "        in sync"
+  else
+    print -- "        MISMATCH -- copy bin/tmx and bin/tmx-status to the remote"
+  fi
+}
+
+# --- Subcommand: help ------------------------------------------------
+cmd_help() {
+  local page=${1:-cmds} file
+  case $page in
+    keys|tmux) file=$TMX_DOCS_DIR/tmux-keys.md ;;
+    cmds|tmx)  file=$TMX_DOCS_DIR/tmx-commands.md ;;
+    *)         usage; return 0 ;;
+  esac
+  [[ -r $file ]] || die "help page not found: $file"
+  if have bat; then
+    bat --style=plain --paging=always --language=markdown "$file"
+    return 0
+  fi
+
+  # ${=...} splits on whitespace, so PAGER="less -F" works. -R is a less option,
+  # so only add it when the pager really is less: `cat -R` is an error, and an
+  # unsplit "less -F" would be looked up as one command name and not found.
+  local -a pager=( ${=PAGER:-less} )
+  if [[ ${pager[1]:t} == less ]]; then
+    "${pager[@]}" -R "$file"
+  else
+    "${pager[@]}" "$file"
+  fi
+}
+
+usage() {
+  print -r -- 'tmx -- one tmux session per work dir, on the remote
+
+  tmx                    fuzzy picker over sessions and work dirs
+  tmx <name|dir>         create-or-attach a session for that dir
+  tmx wt <branch> [dir]  create-or-attach a git worktree session
+  tmx ls                 list sessions, with a compact window list
+  tmx ls -w              expand each session into a window tree
+  tmx kill <name>        kill one session (asks first)
+  tmx kill --all         kill the whole tmux server (asks first)
+  tmx clip               pull the remote saved selection onto this clipboard
+  tmx clip push          push this clipboard to the remote (paste with prefix P)
+  tmx clip scp           print the scp line for the saved selection
+  tmx help keys          tmux keybindings cheatsheet
+  tmx help cmds          this tool, in detail
+  tmx version            version of this copy AND the remote'"'"'s, and whether they match
+
+Flags:
+
+  --ai                   also open a window running your default AI agent
+  --ai=<agent>           ...or a specific one, e.g. --ai=codex
+
+                         Sessions are shell-only without it. The flag goes
+                         anywhere in the arguments and works with the picker and
+                         with wt. On a session that is already running it adds
+                         the window. The window is named after the agent, so
+                         repeating the same one does nothing while a second
+                         agent gets its own window. You stay on your shell
+                         either way.
+
+                         An agent'"'"'s command defaults to its own name, so
+                         --ai=codex needs no configuration if codex is on PATH.
+                         Set TMX_AI_<agent> in the config file to add arguments,
+                         and TMX_AI_DEFAULT to choose what plain --ai runs.'
+}
+
+# --- The picker ------------------------------------------------------
+# Rows are "display TAB kind TAB key". fzf shows field 1; the action uses
+# fields 2 and 3, so directory names containing spaces stay intact.
+cmd_pick() {
+  have fzf || die "fzf not found -- sudo port install fzf"
+
+  local -a rows
+  local -A have_session
+  local name dir att act cre spath note disp d slug
+
+  while IFS=$TAB read -r name dir att act cre spath; do
+    [[ -n $dir ]] || dir=$spath
+    have_session[$name]=1
+    note=$(rel_or_attached "$att" "$act")
+    disp=$(printf '  %-28s %-42s %s' "$name" "${dir/#$HOME/~}" "$note")
+    rows+=( "${disp}${TAB}session${TAB}${name}" )
+  done < <(list_sessions)
+
+  # read, not `for d in $(...)`: see resolve_target. Splitting put half-paths in
+  # the picker, and selecting one opened a session on a directory that does not
+  # exist.
+  while IFS= read -r d; do
+    [[ -n $d ]] || continue
+    slug=$(slug_for_dir "$d")
+    [[ -n ${have_session[$slug]-} ]] && continue
+    disp=$(printf '  %-28s %-42s' "$slug" "${d/#$HOME/~}")
+    rows+=( "${disp}${TAB}dir${TAB}${d}" )
+  done < <(list_dirs)
+
+  (( ${#rows} )) || die "nothing to pick -- check $TMX_PROJECTS_FILE"
+
+  local sel
+  sel=$(print -rl -- $rows | fzf \
+    --delimiter=$TAB --with-nth=1 \
+    --height=100% --layout=reverse --border=none \
+    --prompt='tmx  ' \
+    --header='  live sessions first, then work dirs      enter to open, esc to cancel' \
+    --preview="${(q)TMX_SELF} preview {2} {3}" \
+    --preview-window='right,45%,border-left' ) || return 0
+  [[ -n $sel ]] || return 0
+
+  # sel is "display TAB kind TAB key"
+  TMX_KIND=${${sel#*$TAB}%%$TAB*}
+  TMX_KEY=${sel##*$TAB}
+  open_resolved
+}
+
+# Preview pane for the picker. Hidden subcommand, invoked by fzf.
+cmd_preview() {
+  local kind=${1-} key=${2-} dir
+  case $kind in
+    session)
+      # fzf calls this after the listing was built, so the session may be gone.
+      # Check exactly first: session_opt uses a bare target, which would
+      # prefix-match a longer sibling and preview the wrong directory.
+      if ! session_exists "$key"; then
+        print -r -- "session: $key"
+        print -r -- "(gone -- killed since the list was built)"
+        return 0
+      fi
+      dir=$(session_dir "$key")
+      print -r -- "session: $key"
+      print -r -- "dir:     ${dir/#$HOME/~}"
+      print
+      tmux list-windows -t "=$key" \
+        -F '  #{window_index}  #{window_name}#{?window_active, (active),}' 2>/dev/null
+      print
+      [[ -n $dir ]] && git -C "$dir" log --oneline --decorate -8 2>/dev/null
+      ;;
+    dir)
+      print -r -- "dir:     ${key/#$HOME/~}"
+      print -r -- "session: $(slug_for_dir $key)  (not running yet)"
+      print
+      if git -C "$key" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$key" status --short --branch 2>/dev/null | head -20
+        print
+        git -C "$key" log --oneline --decorate -8 2>/dev/null
+      else
+        ls -1 "$key" 2>/dev/null | head -25
+      fi
+      ;;
+  esac
+  return 0
+}
+
+# =====================================================================
+# Entry point
+# =====================================================================
+main() {
+  # fzf calls this directly on the remote, before any role check matters.
+  if [[ ${1-} == preview ]]; then
+    shift; cmd_preview "$@"; return
+  fi
+
+  # clip runs on BOTH machines and does the opposite thing on each, so it must
+  # be dispatched before the ssh-forwarding branch below.
+  if [[ ${1-} == clip ]]; then
+    shift; cmd_clip "$@"; return
+  fi
+
+  # Hidden: what `tmx version` asks the far side over ssh. Never forwards, and
+  # never needs tmux, so it works even when the rest is misconfigured.
+  if [[ ${1-} == version-only ]]; then
+    print -- "$TMX_VERSION+$(self_fingerprint) ($TMX_SELF)"; return
+  fi
+
+  # Reports both copies, so it must not be forwarded.
+  if [[ ${1-} == (version|--version|-V) ]]; then
+    cmd_version; return
+  fi
+
+  # On the client: forward the invocation to the remote. -t because this ends in
+  # an interactive tmux; $SHELL -lc because `ssh host command` gets a non-login
+  # shell with an incomplete PATH.
+  #
+  # Both quoting layers are load-bearing: ${(q)@} per argument for the shell
+  # -lc parses, ${(qq)...} around the whole string for the shell ssh runs.
+  # Collapsing them breaks any argument containing a space.
+  if ! is_remote; then
+    have ssh || die "ssh not found"
+    local args=''
+    if (( $# )); then
+      args=" ${(j: :)${(q)@}}"
+    fi
+    local remote_cmd="${TMX_REMOTE_BIN}${args}"
+    exec ssh -t "$TMX_REMOTE_HOST" "\$SHELL -lc ${(qq)remote_cmd}"
+  fi
+
+  have tmux || die "tmux not found on PATH ($PATH)
+If it is installed, the shell ssh started did not pick up your package manager's
+bin directory. Point tmx at it in ${TMX_CONFIG_DIR}/config:
+      TMX_PATH_PREPEND=/path/to/bin
+Current value: ${TMX_PATH_PREPEND}"
+
+  # Stripped after the forwarding block on purpose: the client passes arguments
+  # through untouched, so the flag survives the ssh hop and only the remote has
+  # to understand it.
+  local -a rest=()
+  local arg
+  for arg in "$@"; do
+    case $arg in
+      --ai)   TMX_WANT_AI=1; TMX_AI_AGENT=$TMX_AI_DEFAULT ;;
+      --ai=*) TMX_WANT_AI=1; TMX_AI_AGENT=${arg#--ai=} ;;
+      *)      rest+=("$arg") ;;
+    esac
+  done
+  set -- "${rest[@]}"
+
+  # The agent name becomes a tmux window name and part of a variable name, so it
+  # has to be a plain word. Refuse early with something readable rather than
+  # failing later inside tmux.
+  if (( TMX_WANT_AI )); then
+    if [[ -z $TMX_AI_AGENT ]]; then
+      die "--ai= needs an agent name, e.g. --ai=codex (or plain --ai for ${TMX_AI_DEFAULT})"
+    fi
+    if [[ $TMX_AI_AGENT != [A-Za-z0-9_]## ]]; then
+      die "agent name '$TMX_AI_AGENT' must be letters, digits and underscore only"
+    fi
+  fi
+
+  case ${1-} in
+    ''|pick)        cmd_pick ;;
+    ls|list)        shift; cmd_ls "$@" ;;
+    wt|worktree)    shift; cmd_wt "$@" ;;
+    kill)           shift; cmd_kill "$@" ;;
+    help|-h|--help) shift; cmd_help "$@" ;;
+    *)
+      if resolve_target "$1"; then
+        open_resolved
+      else
+        print -u2 -r -- "tmx: '$1' is not a directory, a session, or a known work dir"
+        explain_no_match "$1"
+        print -u2 -r -- ""
+        print -u2 -r -- "Or: tmx        to pick from a list"
+        print -u2 -r -- "    tmx ls     to see what is running"
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,77 @@
+# =====================================================================
+# ssh config for the client -- merge into ~/.ssh/config
+#
+# `tmx-remote`    normal use, resolved over mDNS
+# `tmx-remote-ip` same machine by reserved static IP, for when mDNS misbehaves
+#
+# Written for a LAN, since that is what it was tested on. tmx itself does not
+# care -- a public address, a VPN or a jump host all work; adjust the HostName and
+# the AddressFamily line below to suit. Key auth, and no agent forwarding: the
+# remote holds its own git keys.
+# =====================================================================
+
+# The raw IP is listed too, so typing `youruser@192.168.1.10` by hand still picks up
+# the key, keepalives and connection sharing rather than falling back to
+# defaults. Update it alongside the HostName below if the network changes.
+Host tmx-remote tmx-remote-ip 192.168.1.10
+    User youruser
+
+    # This laptop's key for reaching the remote, and nothing else. Named for
+    # the direction it works in, so it is obvious what it is when you read
+    # the remote's authorized_keys later. Unrelated to the remote's own
+    # ~/.ssh/id_ed25519, which is that machine's git key.
+    IdentityFile ~/.ssh/client_to_remote_ed25519
+
+    # Offer only the key named above. Without this, ssh presents every key
+    # in the agent, which can trip a server's MaxAuthTries.
+    IdentitiesOnly yes
+
+    # If the key has a passphrase, add it to the agent on first use so you are
+    # asked once per boot rather than once per connection. Understood by both
+    # Apple's ssh and MacPorts' OpenSSH.
+    AddKeysToAgent yes
+
+    # Deliberately NOT using UseKeychain here. It exists only in Apple's ssh,
+    # and MacPorts' /opt/local/bin/ssh shadows /usr/bin/ssh on PATH -- under
+    # which the option is a FATAL parse error that breaks every ssh and scp on
+    # this machine, including ones aimed at unrelated hosts.
+    #
+    # IgnoreUnknown is not a fix: it only applies where it is in scope, so a
+    # connection that does not match this Host block still hits the error.
+    # To persist a passphrase in the keychain, do it once by hand instead:
+    #     /usr/bin/ssh-add --apple-use-keychain ~/.ssh/client_to_remote_ed25519
+
+    # Keep an idle session alive and notice a dead one within ~90s.
+    # tmux on the remote means a dropped connection costs you nothing,
+    # but this stops half-open sockets piling up.
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    TCPKeepAlive yes
+
+    # Reuse one TCP connection for repeated `tmx` calls, so the second
+    # invocation does not pay for another handshake.
+    ControlMaster auto
+    ControlPath ~/.ssh/cm/%r@%h:%p
+    ControlPersist 10m
+
+    # No agent forwarding on purpose. The remote has its own git keys, so
+    # nothing on it can borrow this laptop's agent.
+    ForwardAgent no
+
+    # Tuned for a local network: no jump host, and IPv4 only so a stale IPv6
+    # AAAA record cannot add a timeout before the connection is tried. Remove or
+    # change either line if you are reaching the remote some other way.
+    AddressFamily inet
+    Compression no
+
+# Prefer this one. mDNS follows the machine, so it keeps working when either
+# machine moves to a different network.
+Host tmx-remote
+    HostName remote.local
+
+# Fallback for when mDNS is misbehaving. NOTE: this address is specific to one
+# network -- the DHCP reservation only exists on that router. Update it when you
+# change location, or it will be silently wrong exactly when you need it.
+# Current: home/office network as of 2026-08-05.
+Host tmx-remote-ip
+    HostName 192.168.1.10

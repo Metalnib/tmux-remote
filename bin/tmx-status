@@ -1,0 +1,195 @@
+#!/bin/zsh
+# =====================================================================
+# tmx-status -- data for the remote's tmux status line.
+#
+# Called from status-right in ~/.config/tmux/tmux.conf, once every
+# status-interval (15s) per attached client:
+#
+#   tmx-status right <session-name>
+#
+# Emits tmux style tags (#[...]) inline, so the palette lives here as well
+# as in remote.tmux.conf -- keep the two in step if you change colours.
+#
+# Needs a Nerd Font in the terminal for the glyphs. If you see boxes,
+# export TMX_GLYPHS=0 for a plain-text fallback.
+# =====================================================================
+
+emulate -L zsh
+# extended_glob is required, not decoration: the config parser below uses
+# ${x##[[:space:]]##}, which means something else entirely without it.
+setopt pipe_fail extended_glob
+zmodload zsh/datetime
+
+typeset -g TAB=$'\t'
+
+# tmux runs #() status commands with no shell profile, so nothing in the
+# environment can be relied on and the config file has to be read here rather
+# than inherited from `tmx`. Only the two keys the status line needs.
+: ${TMX_CONFIG_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/tmx}
+
+# Captured before any default fills them in, so "set by you" stays
+# distinguishable from "not set".
+typeset -g _tmx_env_prepend=${TMX_PATH_PREPEND-}
+typeset -g _tmx_env_glyphs=${TMX_GLYPHS-}
+
+if [[ -r $TMX_CONFIG_DIR/config ]]; then
+  typeset _tmx_line='' _tmx_key='' _tmx_val=''
+  while IFS= read -r _tmx_line || [[ -n $_tmx_line ]]; do
+    _tmx_line=${_tmx_line%%\#*}
+    _tmx_line=${_tmx_line##[[:space:]]##}
+    _tmx_line=${_tmx_line%%[[:space:]]##}
+    [[ -n $_tmx_line && $_tmx_line == *=* ]] || continue
+    _tmx_key=${_tmx_line%%=*}; _tmx_key=${_tmx_key%%[[:space:]]##}
+    _tmx_val=${_tmx_line#*=};  _tmx_val=${_tmx_val##[[:space:]]##}
+    [[ $_tmx_val == \"*\" || $_tmx_val == \'*\' ]] && _tmx_val=${_tmx_val[2,-2]}
+    case $_tmx_key in
+      TMX_PATH_PREPEND) [[ -n $_tmx_env_prepend ]] || TMX_PATH_PREPEND=$_tmx_val ;;
+      TMX_GLYPHS)       [[ -n $_tmx_env_glyphs ]]  || TMX_GLYPHS=$_tmx_val ;;
+    esac
+  done < $TMX_CONFIG_DIR/config
+  unset _tmx_line _tmx_key _tmx_val
+fi
+unset _tmx_env_prepend _tmx_env_glyphs
+
+: ${TMX_PATH_PREPEND:=/opt/local/bin:/opt/local/sbin}
+: ${TMX_GLYPHS:=1}
+
+typeset -U path
+path=( ${(s.:.)TMX_PATH_PREPEND} $HOME/.local/bin /usr/bin /bin /usr/sbin /sbin $path )
+
+# Palette -- mirrors the REMOTE blue in remote.tmux.conf.
+typeset -g BG='#1b2b40'
+typeset -g FG='#a8bccf'
+typeset -g ACCENT='#3d9be9'
+typeset -g ACCENT_FG='#0b1a29'
+typeset -g DIM='#243a52'
+typeset -g DIM_FG='#7f99b2'
+
+# Literal Nerd Font characters, in the Unicode private use area. Some editors and
+# pipes strip PUA silently, and a viewer showing blanks proves nothing, so verify
+# bytes: expect e0b2 e0b3 f179 f07b e0a0 f126 f017 f1da in this order. $'\ue0b2'
+# escapes work here too; a tmux .conf has no such option and needs literals.
+if (( TMX_GLYPHS )); then
+  SEP=$''        # powerline separator, solid, pointing left
+  SEP_THIN=$''   # powerline separator, thin, between related segments
+  G_HOST=$''     # apple
+  G_DIR=$''      # folder
+  G_BRANCH=$''   # git branch
+  G_WT=$''       # code fork -- marks a worktree
+  G_CLOCK=$''    # clock -- last attached
+  G_UP=$''       # history -- active since
+
+  # Not a character count: ${#SEP} depends on the locale, and a tmux server
+  # without LANG reports 3 for an intact glyph. Test for the actual failures --
+  # stripped to empty, or an escape left as literal text.
+  if [[ -z $SEP || -z $G_BRANCH || $SEP == *'\u'* || $G_BRANCH == *'\u'* ]]; then
+    TMX_GLYPHS=0
+  fi
+fi
+
+if (( ! TMX_GLYPHS )); then
+  SEP='' ; SEP_THIN='|'
+  G_HOST='host:' ; G_DIR='dir:' ; G_BRANCH='branch:'
+  G_WT='[worktree]' ; G_CLOCK='seen:' ; G_UP='up:'
+fi
+
+# Seconds -> compact duration. Same rules as `tmx ls`.
+rel_time() {
+  local -i s=$1 m h d
+  (( s < 0 )) && s=0
+  if (( s < 60 )); then print -- "${s}s"; return; fi
+  m=$(( s / 60 ))
+  if (( m < 60 )); then print -- "${m}m"; return; fi
+  h=$(( m / 60 )); m=$(( m % 60 ))
+  if (( h < 24 )); then print -- "${h}h${m}m"; return; fi
+  d=$(( h / 24 )); h=$(( h % 24 ))
+  print -- "${d}d${h}h"
+}
+
+# Branch name, and whether this is a LINKED worktree: its git dir sits under the
+# main repo's .git/worktrees/, so the two paths differ. --git-common-dir is
+# relative in the main tree and absolute in a linked one, so normalise it.
+typeset -g git_branch=''
+typeset -gi git_is_worktree=0
+probe_git() {
+  local dir=$1 top gd cd
+  [[ -n $dir && -d $dir ]] || return 0
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  git_branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+    || git_branch="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null) detached"
+
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 0
+  gd=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+  cd=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 0
+  [[ $cd == /* ]] || cd="$top/$cd"
+  [[ ${gd:A} != ${cd:A} ]] && git_is_worktree=1
+  return 0
+}
+
+seg() {  # seg <bg> <fg> <text>
+  print -n -- "#[bg=$1,fg=$2]$3"
+}
+
+# Takes ONLY the session name and asks tmux for the rest.
+#
+# tmux expands #{...} into the status command string before /bin/sh sees it, so
+# anything interpolated there is shell syntax. A session name is safe because
+# `tmx` restricts it to letters, digits, - and _; a work directory is not. The
+# rest is fetched here, where it stays data. #() inherits $TMUX, so this reaches
+# the right server even on a non-default socket.
+cmd_right() {
+  local session=${1-}
+  [[ -n $session ]] || return 0
+
+  local dir spath attached activity created
+  IFS=$TAB read -r dir spath attached activity created <<<"$(tmux display-message -p \
+    -t "=${session}:" \
+    "#{@tmx_dir}${TAB}#{session_path}${TAB}#{session_attached}${TAB}#{session_activity}${TAB}#{session_created}" \
+    2>/dev/null)"
+
+  [[ -n $dir ]] || dir=$spath
+  local host=${$(hostname -s 2>/dev/null):-remote}
+  [[ -n $attached ]] || attached=0
+  [[ -n $activity ]] || activity=$EPOCHSECONDS
+  [[ -n $created ]] || created=$EPOCHSECONDS
+
+  probe_git "$dir"
+
+  local short=${dir/#$HOME/\~} last up
+  if [[ $attached == 0 ]]; then
+    last="$(rel_time $(( EPOCHSECONDS - activity ))) ago"
+  else
+    last="attached"
+  fi
+  up="$(rel_time $(( EPOCHSECONDS - created )))"
+
+  # Built left to right. Each segment opens with a separator drawn in the
+  # previous segment's background colour.
+  print -n -- "#[bg=$BG,fg=$DIM]$SEP"
+  seg $DIM $FG " $G_DIR $short "
+
+  if [[ -n $git_branch ]]; then
+    print -n -- "#[bg=$DIM,fg=$DIM_FG]$SEP_THIN"
+    seg $DIM $FG " $G_BRANCH $git_branch "
+    (( git_is_worktree )) && seg $DIM $ACCENT "$G_WT "
+  fi
+
+  print -n -- "#[bg=$DIM,fg=$DIM_FG]$SEP_THIN"
+  seg $DIM $DIM_FG " $G_CLOCK $last "
+  print -n -- "#[bg=$DIM,fg=$DIM_FG]$SEP_THIN"
+  seg $DIM $DIM_FG " $G_UP $up "
+
+  print -n -- "#[bg=$DIM,fg=$ACCENT]$SEP"
+  seg $ACCENT $ACCENT_FG " $G_HOST $host "
+  print -n -- "#[default]"
+  print
+}
+
+case ${1:-right} in
+  right) shift; cmd_right "$@" ;;
+  *)
+    print -u2 -r -- "usage: tmx-status right <session-name>"
+    exit 2
+    ;;
+esac

@@ -1,0 +1,107 @@
+# tmx projects -- copy to ~/.config/tmx/projects on the remote and edit.
+#
+# This is the file you will change most often. It answers two questions: which
+# directories does the picker offer, and what do you want them called?
+#
+# ---------------------------------------------------------------------
+# TWO KINDS OF LINE
+#
+#   ~/code                       a ROOT.  No "=".  Its children are offered.
+#   webapi = ~/code/acme/webapi  an ALIAS. Has "=". Names one directory.
+#
+# That is the whole syntax. Roots shape the menu, aliases give a directory a
+# short name of your own. Blank lines and # comments are ignored.
+#
+# ---------------------------------------------------------------------
+# THE RULE
+#
+# Each line below is a CONTAINER. Its subdirectories are offered as work dirs.
+# The container itself is not offered, and nothing deeper than one level is.
+#
+#   ~/code            <- a line in this file
+#     api             <- offered, as session code-api
+#     web             <- offered, as session code-web
+#       frontend      <- NOT offered, too deep
+#
+# Anything one level too deep is still reachable by typing its path:
+#
+#   tmx ~/code/web/frontend      opens it, as session web-frontend
+#
+# So the roots file controls the menu, not what you are allowed to open.
+#
+# ---------------------------------------------------------------------
+# TWO RULES THAT KEEP THE LIST SHORT
+#
+# 1. Blocklist. Library, Applications, Desktop, Downloads, Documents, Music,
+#    Movies, Pictures, Public, Sites, and anything starting with a dot are never
+#    offered. This is what makes bare ~ usable as a root.
+#
+# 2. Deeper root wins. If a directory is itself listed as a root, it disappears
+#    from its parent's listing. This one surprises people, so:
+#
+#      ~                        ~/code is offered
+#      ~/code                   ...no longer offered, because it is a root now.
+#                               Its children are offered instead.
+#
+#    The same thing applies further down. If you add ~/code/acme as a root, then
+#    `acme` vanishes from ~/code's listing and you can no longer create a session
+#    called code-acme by name. You gain acme-api and acme-web instead. That is a
+#    trade, not an improvement, so only add a container as a root when you
+#    actually work inside its children rather than in the container itself.
+#
+# ---------------------------------------------------------------------
+# THREE LAYOUTS, AND WHAT TO WRITE
+#
+# Everything in one folder:            ~/src/api, ~/src/web
+#   ~/src
+#   -> offered: src-api, src-web
+#
+# Grouped by client or org:            ~/code/acme/api, ~/code/globex/web
+#   ~/code
+#   -> offered: code-acme, code-globex   (the groups, not the projects)
+#   Add the groups too if you always work one level deeper:
+#   ~/code
+#   ~/code/acme
+#   ~/code/globex
+#   -> offered: acme-api, globex-web     (but no longer code-acme)
+#
+# Repos loose in your home directory:  ~/dotfiles, ~/notes
+#   ~
+#   -> offered: dotfiles, notes          (no prefix, straight off $HOME)
+#
+# ---------------------------------------------------------------------
+# CHECKING A CHANGE
+#
+# Nothing needs restarting; the file is read on every run. To see the result,
+# open the picker with `tmx` and look at the bottom group, which is the work dirs
+# that have no session yet. `tmx some-name-that-does-not-exist` also prints the
+# names it knows, though the list is truncated.
+#
+# ---------------------------------------------------------------------
+# ALIASES
+#
+# An alias becomes the SESSION name, so `tmx webapi` opens a session called
+# webapi rather than acme-webapi. Use one when a derived name is not what you
+# call the thing, or when the directory sits too deep for a root to reach it.
+#
+#   webapi          = ~/code/acme/webapi
+#   current-project = ~/code/acme/webapi
+#
+# Two aliases on one directory is fine. There is one session per directory
+# whatever it is called, so whichever name you use first creates it and every
+# other route attaches to the same session and tells you its name.
+#
+# Names may use letters, digits, - and _ only, because a name has to work as a
+# tmux session name. Anything else is skipped with a warning. An alias also beats
+# a same-named live session, so an alias always means its directory.
+#
+# ---------------------------------------------------------------------
+# A leading ~ is expanded. Roots that do not exist are skipped without complaint,
+# so it is safe to keep lines for machines you are not on right now. An alias
+# pointing at a missing directory only complains when you use it.
+
+~
+~/code
+
+#webapi          = ~/code/acme/webapi
+#current-project = ~/code/acme/webapi

@@ -1,0 +1,73 @@
+# tmx settings -- copy to ~/.config/tmx/config on BOTH machines and edit.
+#
+# Plain KEY=value lines. `#` starts a comment, blank lines are ignored, and
+# surrounding quotes are stripped. Unknown keys are ignored, so a typo is
+# silent rather than fatal -- check with `tmx version` if something looks wrong.
+#
+# The file is PARSED, not sourced. There is no shell expansion, so write
+# /Users/you/bin rather than $HOME/bin, and no command substitution can run
+# from here.
+#
+# Precedence: environment  >  this file  >  built-in defaults.
+# So `TMX_AI_CMD=other tmx foo` still overrides the value set here.
+
+# --- the remote machine ----------------------------------------------
+# The ssh host alias tmx forwards to, as it appears in ~/.ssh/config on the
+# client. This is the one setting most people need to change.
+#TMX_REMOTE_HOST=my-remote
+
+# What `hostname -s` prints on the remote. Used only as a fallback way to
+# detect which machine tmx is running on; the marker file
+# ~/.config/tmx/remote is the reliable signal and is what INSTALL.md sets up.
+#TMX_REMOTE_NAME=my-remote
+
+# Where tmx is installed on the remote. Left as a ~ path on purpose: it is
+# expanded by the remote's shell, not here.
+#TMX_REMOTE_BIN=~/.local/bin/tmx
+
+# Force a role instead of detecting it. "remote" makes this copy do the work
+# rather than forwarding over ssh. Rarely needed.
+#TMX_ROLE=remote
+
+# --- finding your tools ----------------------------------------------
+# `ssh host command` gets a non-interactive, non-login shell that reads only
+# ~/.zshenv, and tmux runs #() status commands with no profile at all. In both
+# cases your package manager's bin directory may be missing, so tmux, fzf and
+# git look uninstalled. These directories are put in front of PATH.
+#
+# The default suits MacPorts, which is what this was built and tested against.
+# Set this to wherever your own tmux, fzf and git actually live.
+#TMX_PATH_PREPEND=/opt/local/bin:/opt/local/sbin
+
+# --- AI agents -------------------------------------------------------
+# `tmx --ai` opens an agent in its own window, named after the agent so you can
+# see in `tmx ls` which one is in there. Two different agents can share a
+# session; asking for the same one twice does nothing.
+#
+# An agent's command defaults to its own name, so `tmx --ai=codex` already works
+# if `codex` is on PATH -- you only need a line here to add arguments or point at
+# a different binary. Agent names are letters, digits and underscore.
+#
+# Which agent plain `--ai` picks:
+#TMX_AI_DEFAULT=claude
+#
+# Optional per-agent command lines. Arguments and quotes are preserved.
+#TMX_AI_codex=codex
+#TMX_AI_opencode=opencode --model local
+#TMX_AI_aider=aider --no-auto-commits
+#
+# Avoid naming an agent DEFAULT or CMD, since those collide with the two keys
+# above. An explicit TMX_AI_CMD still overrides the default agent's command.
+#TMX_AI_CMD=
+
+# Directory name used for git worktrees, created next to the main repo.
+#TMX_WORKTREE_DIRNAME=.worktrees
+
+# Set to 0 for a plain-text status line if your terminal font has no Nerd Font
+# glyphs, or if you see boxes instead of icons.
+#TMX_GLYPHS=1
+
+# --- paths (defaults are usually right) ------------------------------
+#TMX_ROOTS_FILE=/Users/you/.config/tmx/roots
+#TMX_DOCS_DIR=/Users/you/.config/tmx/docs
+#TMX_CLIP_FILE=/Users/you/.cache/tmx/clip.txt
