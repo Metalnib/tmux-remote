@@ -3,21 +3,143 @@
 **Remote tmux you don't have to learn.**
 
 Your work runs on the machine with the CPU, the RAM and the repos. You drive it
-from whatever you happen to be sitting at. Close the lid mid-build, walk off,
-open it somewhere else and everything is still going, because none of it was ever
+from whatever you happen to be sitting at. Close the lid mid-build, walk off, open
+it somewhere else and everything is still going, because none of it was ever
 running on your laptop.
 
+You need two machines and ssh between them. Everything else is one command:
+
 ```sh
-tmx code-api             # create or attach, on the remote, one command
-tmx                      # or fuzzy-pick from a list
-tmx --ai code-api        # ...with an AI agent in its own window
-tmx ls -w                # what is running, per window
+tmx code-api          # start or resume work on ~/code/api, over there
 ```
 
-## One idea
+---
 
-**Session names come from the directory.** `~/code/api` is always `code-api`, and
-the same command creates it or attaches to it:
+## Quick start
+
+Two machines. The **remote** is the one with your repos; the **client** is whatever
+you sit at. [INSTALL.md](INSTALL.md) is the same thing with the reasons attached.
+
+**1. On the remote:**
+
+```sh
+git clone https://github.com/Metalnib/tmux-remote ~/tmux-remote
+mkdir -p ~/.local/bin ~/.config/tmx/docs ~/.config/tmux
+
+cp ~/tmux-remote/bin/tmx ~/tmux-remote/bin/tmx-status ~/.local/bin/
+chmod +x ~/.local/bin/tmx ~/.local/bin/tmx-status
+
+cp ~/tmux-remote/tmux/remote.tmux.conf ~/.config/tmux/tmux.conf
+cp ~/tmux-remote/config/config.example ~/.config/tmx/config
+cp ~/tmux-remote/config/projects       ~/.config/tmx/projects
+cp ~/tmux-remote/docs/*.md             ~/.config/tmx/docs/
+
+touch ~/.config/tmx/remote     # says "this machine does the work"
+```
+
+**2. On the client**, three things. No `tmx-status`, no docs, no projects file:
+this machine only forwards over ssh, so the remote answers everything.
+
+```sh
+git clone https://github.com/Metalnib/tmux-remote ~/tmux-remote
+mkdir -p ~/.local/bin ~/.config/tmux
+
+cp ~/tmux-remote/bin/tmx ~/.local/bin/ && chmod +x ~/.local/bin/tmx
+cp ~/tmux-remote/tmux/client.tmux.conf ~/.config/tmux/tmux.conf
+cp ~/tmux-remote/config/config.example ~/.config/tmx/config
+```
+
+**3. On both**, edit one line in `~/.config/tmx/config`:
+
+```
+TMX_REMOTE_HOST=my-remote     # the ssh host alias for the remote machine
+```
+
+**4. Check it:**
+
+```sh
+tmx version     # prints both machines and says "in sync"
+```
+
+Two ways it usually goes wrong. If it cannot reach the remote, ssh is the problem
+rather than `tmx`, so get `ssh my-remote` working first. If it says `tmux not
+found` even though tmux is installed, set `TMX_PATH_PREPEND` in your config file:
+`ssh host command` gets a shell that reads almost none of your profile, so tools
+on your normal `PATH` can be invisible to it.
+
+An install script that does all of this is the top item on
+[ROADMAP.md](ROADMAP.md).
+
+---
+
+## Your first five minutes
+
+**Start working on a directory.** The remote has `~/code/api`, so:
+
+```sh
+tmx code-api
+```
+
+You are now in a shell on the remote, in that directory, with a status bar along
+the bottom. Nothing else happened: no window layout to learn, no menu.
+
+**Step away on purpose.** Press `Ctrl-b` then `d` (for detach). You are back on
+your own machine. Everything you left running keeps running.
+
+**Come back.** Same command as before:
+
+```sh
+tmx code-api
+```
+
+That is the whole loop. `tmx <name>` starts it if it is not running and resumes it
+if it is, so you never have to remember which.
+
+**Now close your laptop mid-command and open it later.** Run `tmx code-api` again.
+Your command finished while you were away. That is the point of the whole thing.
+
+**See what you have running:**
+
+```sh
+tmx ls
+```
+
+**Forgotten the name?** Run `tmx` with no arguments and pick from the list.
+
+### Four tmux words you will meet
+
+You do not need to learn tmux, but these four words appear on screen:
+
+| word | means |
+|---|---|
+| session | one running workspace, one per directory here |
+| window | a tab inside a session. `Ctrl-b c` makes one, `Ctrl-b n` next |
+| detach | step away and leave it running. `Ctrl-b d` |
+| prefix | the `Ctrl-b` you press before a tmux key |
+
+`Ctrl-b ?` shows the keys, `Ctrl-b /` shows the `tmx` commands. Both open inside
+tmux, so you never have to leave to look something up.
+[docs/tmux-keys.md](docs/tmux-keys.md) is the same thing written for someone who
+has never used tmux.
+
+---
+
+## The three commands you actually use
+
+| command | does |
+|---|---|
+| `tmx <name>` | start or resume work on that directory |
+| `tmx` | pick from a list, if you forgot the name |
+| `tmx ls` | what is running, where, and on which branch |
+
+Everything below is optional.
+
+---
+
+## How names work
+
+**Session names come from the directory.** `~/code/api` is always `code-api`, so
+one command creates it or resumes it and there is nothing to remember:
 
 ```
 ~/code/api          ->  code-api
@@ -26,49 +148,62 @@ the same command creates it or attaches to it:
 ~/code/my project   ->  code-my-project   (typeable, never needs quoting)
 ```
 
-Everything else follows from that. Nothing to name, nothing to remember, no list
-to keep tidy, and running `tmx` twice is never a mistake.
-
-The working title was "tmux for idiots". The idiot was me: `api` on Monday,
-`work-api` on Thursday, then ten minutes on Friday typing into the wrong session
-wondering why my changes kept vanishing. Deriving the name from the directory
-fixed that, which also made the title inaccurate.
-
-## Which directories it offers
-
-One file, `~/.config/tmx/projects`, says where your work is and what to call it.
-A line without `=` is a **root**: its children are offered, one level deep, and the
-root itself is not.
-
-```
-~            ->  dotfiles, notes         (things sitting in $HOME)
-~/code       ->  code-api, code-web      (~/code itself is not offered)
-```
-
-That controls the menu, not what you may open. **Any path works, however deep,
-whether or not a root covers it:**
+A name is always the last two path components, so a deep path does not get a long
+name. **Any path works, at any depth:**
 
 ```sh
-tmx ~/code/web/frontend/admin      # fine, opens as frontend-admin
+tmx ~/code/acme/services/billing/api      # opens as billing-api
 ```
 
-A name is always the last two path components, so depth never makes it longer.
-Full rules, three example layouts and the one surprising rule are in
-[docs/tmx-commands.md](docs/tmx-commands.md#the-roots-file).
+The working title of all this was "tmux for idiots". The idiot was me: `api` on
+Monday, `work-api` on Thursday, then ten minutes on Friday typing into the wrong
+session wondering why my changes kept vanishing. Deriving the name from the
+directory fixed that, which also made the title inaccurate.
 
-A line **with** `=` is an **alias**, for when a derived name is not what you call
-the thing:
+## Making the list your own
+
+One file, `~/.config/tmx/projects`, decides what the picker offers and what things
+are called. Two kinds of line:
 
 ```
-webapi          = ~/code/acme/webapi
-current-project = ~/code/acme/webapi
+~/code                        a ROOT.  Its children are offered, one level deep.
+
+webapi = ~/code/acme/webapi   an ALIAS. Gives one directory a name you choose.
 ```
 
-The alias becomes the session name. Both of those point at one directory, which is
-fine: there is **one session per directory, whatever it is called**, so the alias,
-the derived name and the bare path all land in the same place.
+An alias becomes the session name, so `tmx webapi` opens a session called
+`webapi`. There is **one session per directory whatever it is called**, so an
+alias, the derived name and a bare path all land in the same place.
 
-## What you get
+The file documents itself, and [docs/tmx-commands.md](docs/tmx-commands.md) has
+worked examples for three common layouts.
+
+## What else it does
+
+**An AI agent in its own window**, if you ask for one:
+
+```sh
+tmx --ai code-api          # your default agent alongside the shell
+tmx --ai=codex code-api    # a specific one
+```
+
+The agent's command defaults to its own name, so `--ai=codex` needs no
+configuration if `codex` is on your `PATH`. The window is named after the agent,
+so `tmx ls` shows which is running, and `--ai` also works on a session that has
+been going for days.
+
+**A session per branch**, using git worktrees:
+
+```sh
+cd ~/code/acme/api && tmx wt fix/91     # session acme-api--fix-91
+```
+
+**Big copy-paste between the machines.** Ordinary copies cross by themselves over
+OSC 52. When a selection is too big for that, `Y` in copy mode writes it to a file
+on the remote and `tmx clip` pulls it onto your local clipboard.
+
+**A status line** showing host, directory, git branch, a worktree marker, when it
+was last attached and how long it has been alive:
 
 ```
 $ tmx ls
@@ -78,14 +213,10 @@ acme-api     ~/code/acme/api  develop -   45m ago        6h    1:shell*
 api--fix-91  ~/code/.wor...   fix/91  wt  2h ago         2d1h  1:shell* 2:codex
 ```
 
-`WT` marks a git worktree session. `WINDOWS` names the agent, so you can see
-which sessions have one and which agent it is.
-
-The remote's status line carries the same information for the session you are in:
-host, directory, git branch, a worktree marker, when it was last attached, and
-how long it has been alive. The client and the remote use different colour
-palettes on purpose, so a nested session never leaves you guessing which machine
-your keystrokes are going to.
+The client and the remote use different colour palettes on purpose, so when one
+tmux is running inside another you always know which machine your keystrokes are
+going to. `F12` on the client hands the whole keyboard to the remote, and again
+takes it back.
 
 ## Two machines
 
@@ -97,72 +228,21 @@ your keystrokes are going to.
 | tmux config | `tmux/client.tmux.conf` | `tmux/remote.tmux.conf` |
 
 `tmx` is installed on both and works out which one it is, so `tmx code-api` typed
-on the laptop drops you inside the remote session in a single step. No `ssh`
-first.
+on the laptop drops you inside the remote session in one step. No `ssh` first.
 
-Both ends use the standard `C-b` prefix, so nesting works and every piece of tmux
-documentation you find applies as written. `C-b c` opens a window locally,
-`C-b C-b c` opens one on the remote, and `F12` switches the local bindings off so
-plain `C-b` goes straight through.
-
-## Sessions and agents
-
-| window | what is in it | when |
-|---|---|---|
-| 1 `shell` | a login shell in the work directory, where you land | always |
-| 2 *agent* | an AI agent, same directory, window named after it | with `--ai` |
-
-That is the whole layout. Anything else you open yourself; `tmx` has no list of
-tools it starts on your behalf.
-
-**Which agent is up to you.** An agent's command defaults to its own name, so
-`tmx --ai=codex` already works if `codex` is on your `PATH`. A config line is only
-needed to add arguments:
-
-```
-TMX_AI_DEFAULT=claude
-TMX_AI_opencode=opencode --model local
-```
-
-Because the window is named after the agent, two different agents can share a
-session, asking for the same one twice does nothing, and `--ai` works on a session
-that has been running for days.
-
-## Worktrees
-
-One session per branch, on top of one session per repo:
-
-```sh
-cd ~/code/acme/api
-tmx wt fix/91
-```
-
-You get session `acme-api--fix-91`, a worktree at
-`~/code/.worktrees/api--fix-91`, and a marker in the status line so you always
-know you are not in the main checkout. Run it again later and you just attach. It
-works from inside another worktree too.
-
-## Clipboard
-
-Ordinary copies cross on their own over OSC 52. That holds until the selection
-gets big, at which point escape sequences start getting truncated (twice over,
-with a nested tmux in the middle). For those, `Y` in copy mode writes the
-selection to a file on the remote, and `tmx clip` pulls it onto your local
-clipboard. `tmx clip push` goes the other way.
-
-## Commands
+## All commands
 
 | command | does |
 |---|---|
-| `tmx` | fuzzy picker over live sessions and work dirs |
-| `tmx <name>` | attach to that session, creating it if needed |
+| `tmx` | picker over live sessions and work dirs |
+| `tmx <name>` | start or resume that session |
 | `tmx <dir>` | the same, for a path |
 | `tmx wt <branch> [repo]` | session for a git worktree, creating it if needed |
 | `tmx ls` | sessions with dir, branch, worktree flag, times, windows |
-| `tmx ls -w` | the same, expanded into a per-session window tree |
+| `tmx ls -w` | expanded into a per-session window tree |
 | `tmx kill <name>` \| `--all` | kill, after a confirmation |
 | `tmx clip` \| `push` \| `scp` | move a large selection between machines |
-| `tmx help keys` \| `cmds` | the cheatsheets, also on `prefix ?` and `prefix /` |
+| `tmx help keys` \| `cmds` | the cheatsheets, also on `Ctrl-b ?` and `Ctrl-b /` |
 | `tmx version` | this copy and the remote's, and whether they match |
 | `--ai` \| `--ai=<agent>` | add an agent window, anywhere in the arguments |
 
@@ -179,35 +259,16 @@ clipboard. `tmx clip push` goes the other way.
 
 Nothing is installed for you and nothing runs as a daemon. `tmx` is one zsh
 script, `tmx-status` is another, and the rest is tmux config you can read.
-Nothing outside that list is needed to run it.
-
-## Install
-
-[INSTALL.md](INSTALL.md) has the steps. The shape of it: `bin/tmx` on both
-machines, `bin/tmx-status` and a marker file on the remote, one tmux config each,
-and `ssh/config.client` merged into the client's `~/.ssh/config`.
-
-Then copy `config/config.example` to `~/.config/tmx/config` on both and set
-`TMX_REMOTE_HOST` to your ssh host alias. For most people that is the only line
-they ever touch.
-
-If your `tmux`, `fzf` and `git` are not in `/opt/local/bin`, set
-`TMX_PATH_PREPEND` as well. This matters more than it looks: `ssh host command`
-gets a shell that reads only `~/.zshenv`, and tmux runs status commands with no
-profile at all, so tools that are obviously on your `PATH` when you are typing can
-be invisible to both.
-
-An install script is planned, see [ROADMAP.md](ROADMAP.md).
 
 ## Docs
 
 **Using it**
 
-- [docs/tmux-keys.md](docs/tmux-keys.md), keybindings, written for someone new to
-  tmux. Also on `prefix ?`.
-- [docs/tmx-commands.md](docs/tmx-commands.md), the CLI in detail, with
-  troubleshooting. Also on `prefix /`.
-- [INSTALL.md](INSTALL.md), setting up both machines.
+- [docs/tmux-keys.md](docs/tmux-keys.md), tmux keys for someone new to tmux. Also
+  on `Ctrl-b ?`.
+- [docs/tmx-commands.md](docs/tmx-commands.md), every command in detail, plus
+  troubleshooting. Also on `Ctrl-b /`.
+- [INSTALL.md](INSTALL.md), the long-form install with the reasons.
 
 **Working on it**
 
@@ -215,7 +276,7 @@ An install script is planned, see [ROADMAP.md](ROADMAP.md).
 - [docs/gotchas.md](docs/gotchas.md), measured behaviour in zsh, tmux and ssh that
   the code depends on. Worth reading before simplifying anything.
 - [CHANGELOG.md](CHANGELOG.md), what changed.
-- [ROADMAP.md](ROADMAP.md), what is planned.
+- [ROADMAP.md](ROADMAP.md), what is planned. An install script is near the top.
 
 Working on it also wants `python3`, for `bin/lint-shell-structure.py`. Running
 `tmx` never does.
