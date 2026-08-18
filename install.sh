@@ -24,7 +24,7 @@ TMUXCFG="${XDG_CONFIG_HOME:-$HOME/.config}/tmux"
 BIN="$HOME/.local/bin"
 STAMP=$(date +%Y%m%d-%H%M%S)
 
-ROLE=""; BOTH=0; DRY=0; UNINSTALL=0; RHOST=""
+ROLE=""; BOTH=0; DRY=0; UNINSTALL=0; RHOST=""; DEPLOY_TARGET=0
 FAIL=0
 
 say()  { printf '%s\n' "$*"; }
@@ -60,6 +60,9 @@ while [ $# -gt 0 ]; do
     --role) shift; ROLE=${1-}
             case $ROLE in remote|client) ;; *) die "--role needs remote or client" ;; esac ;;
     --both)          BOTH=1 ;;
+    # Internal: set by --both on the remote leg, where installing the remote is
+    # the whole point, so the client-machine guard must not ask.
+    --deploy-target) DEPLOY_TARGET=1 ;;
     --remote-host=*) RHOST=${1#*=} ;;
     --remote-host)   shift; RHOST=${1-}; [ -n "$RHOST" ] || die "--remote-host needs a name" ;;
     --dry-run)       DRY=1 ;;
@@ -118,15 +121,20 @@ if [ -z "$ROLE" ]; then
   fi
 fi
 
-# A config with TMX_REMOTE_HOST set belongs to a client: that line is only ever
-# written for the client role. Installing such a machine as the remote stops it
-# forwarding, and every session lands here instead of over there.
-if [ "$ROLE" = remote ] && [ "$UNINSTALL" = 0 ] && \
-   grep -q '^TMX_REMOTE_HOST=' "$CFG/config" 2>/dev/null; then
-  RH_SET=$(sed -n 's/^TMX_REMOTE_HOST=//p' "$CFG/config" | head -1)
-  warn "this machine already forwards to '$RH_SET', so it is set up as a CLIENT"
-  say  "         As the remote it would stop forwarding and run everything here."
-  say  "         To install on '$RH_SET' instead, run:"
+# An installed CLIENT tmux config, with no remote marker beside it, means this is
+# the machine you sit at. Installing it as the remote stops it forwarding, and
+# every session then lands here instead of over there.
+#
+# TMX_REMOTE_HOST is NOT the signal to use: config.example goes to both machines,
+# so a correctly installed remote names a host too.
+if [ "$ROLE" = remote ] && [ "$UNINSTALL" = 0 ] && [ "$DEPLOY_TARGET" = 0 ] &&
+   [ ! -e "$CFG/remote" ] &&
+   grep -q 'for the CLIENT machine' "$TMUXCFG/tmux.conf" 2>/dev/null; then
+  RH_SET=$(sed -n 's/^TMX_REMOTE_HOST=//p' "$CFG/config" 2>/dev/null | head -1)
+  [ -n "$RH_SET" ] || RH_SET=your-remote
+  warn "this machine has the CLIENT tmux config, so it is the one you sit at"
+  say  "         As the remote it would stop forwarding, and run everything here."
+  say  "         To install on '$RH_SET' over ssh instead, run:"
   say  "             $0 --both --remote-host=$RH_SET"
   if [ -t 0 ]; then
     printf 'Install THIS machine as the remote anyway? [y/N] '
@@ -404,7 +412,12 @@ if [ "$BOTH" = 1 ]; then
       | ssh "$RHOST" 'mkdir -p ~/tmux-remote && tar -xf - -C ~/tmux-remote' \
       || die "cannot reach $RHOST over ssh. Fix 'ssh $RHOST' first."
     say "   running the installer there"
-    ssh "$RHOST" 'sh ~/tmux-remote/install.sh --role=remote' || bad "the remote install reported problems"
+    # Through a login shell, for the same reason tmx does it: plain
+    # `ssh host command` reads only ~/.zshenv, so tools in /opt/local/bin look
+    # missing and TMX_PATH_PREPEND gets derived from a PATH nobody uses.
+    # See docs/gotchas.md #12.
+    ssh "$RHOST" '$SHELL -lc "sh ~/tmux-remote/install.sh --role=remote --deploy-target"' \
+      || bad "the remote install reported problems"
 
     say ""
     say "   proving the round trip:"

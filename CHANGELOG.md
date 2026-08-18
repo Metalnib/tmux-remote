@@ -9,12 +9,13 @@ Install script. Better instructions.
 
 **Added**
 
-- `tests/install-test.sh`: Docker integration test for the installer. Fifteen
+- `tests/install-test.sh`: Docker integration test for the installer. Eighteen
   checks, from missing-dependency messages up to `--both` across two containers
   over real ssh, ending with a session created remotely by a plain `tmx <name>`.
   Part 2 appends the shipped `ssh/config.client`, edits the two `# EDIT ME` lines
   and connects by the nickname it defines, so the documented install path is what
-  gets tested.
+  gets tested. The remote container keeps tmux and fzf where only a login shell
+  can see them, which is what a MacPorts remote looks like.
 - `install.sh`: one command per machine, or `--both --remote-host=NAME` from the
   client to do the pair. Checks dependencies per role, derives
   `TMX_PATH_PREPEND`, migrates a legacy `roots` file and a legacy `~/.tmux.conf`,
@@ -31,6 +32,18 @@ Install script. Better instructions.
 
 **Fixed**
 
+- `install.sh --both` ran the remote installer through plain `ssh host command`,
+  which reads only `~/.zshenv`. Tools in `/opt/local/bin` looked missing and
+  `TMX_PATH_PREPEND` was derived as `/usr/bin`, so `tmx` on a freshly deployed
+  remote could not find tmux. The remote leg goes through `$SHELL -lc`, the way
+  `bin/tmx` does. See docs/gotchas.md #12.
+- `install.sh` asked "Which machine is this?" and offered "remote", which reads as
+  "deploy to the remote" and turned the machine in front of you into the remote.
+  It now asks what to do, and one of the three answers is "install here as the
+  client, then deploy to the remote over ssh". Choosing the remote role on a
+  machine that carries the client tmux config asks for confirmation first.
+- `TMX_VERSION` said `2026-08-06.4` while the newest release here was
+  `2026-08-18`. `tests/install-test.sh` fails when the two disagree.
 - `SPEC.md` said the status line falls back to plain text when a glyph "is not
   exactly one character". That was the behaviour before 2026-08-05.9;
   `tmx-status` tests for a glyph that arrives empty or as a literal `\u` escape,

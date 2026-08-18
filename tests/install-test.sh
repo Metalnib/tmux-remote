@@ -229,6 +229,18 @@ docker exec tmxtest-client ssh -o BatchMode=yes remote-box true 2>/dev/null \
 # something to open a session on, over there
 docker exec tmxtest-remote sh -c 'mkdir -p /root/code/api'
 
+# Put the remote's tools where only a LOGIN shell can see them. That is the
+# normal MacPorts layout (/opt/local/bin), and it is what made the installer
+# report tmux and fzf missing when the deploy leg used a plain `ssh host command`.
+# See docs/gotchas.md #12.
+docker exec tmxtest-remote sh -c '
+  mkdir -p /opt/local/bin
+  mv /usr/bin/tmux /opt/local/bin/tmux
+  mv /usr/bin/fzf  /opt/local/bin/fzf
+  printf "export PATH=/opt/local/bin:\$PATH\n" > /root/.bash_profile
+  cp /root/.bash_profile /root/.zprofile
+'
+
 # the flagship path from the README, with the nickname the template defines
 if out=$(docker exec tmxtest-client sh /repo/install.sh --both --remote-host=remote-box 2>&1); then
   pass "--both ran to completion"
@@ -240,6 +252,18 @@ printf '%s' "$out" | grep -q 'in sync' \
   && pass "tmx version round trip says 'in sync'" \
   || fail "no 'in sync' in the --both output"
 
+# The deploy leg has to reach the remote through a login shell, or the tools it
+# checks for are invisible and TMX_PATH_PREPEND is derived from a PATH nobody uses.
+if printf '%s' "$out" | grep -qE '(tmux|fzf) missing'; then
+  fail "the remote install could not see tmux/fzf: the deploy leg needs \$SHELL -lc"
+else
+  pass "remote deps found through a login shell, not the thin ssh PATH"
+fi
+
+docker exec tmxtest-remote grep -q '^TMX_PATH_PREPEND=/opt/local/bin' /root/.config/tmx/config \
+  && pass "TMX_PATH_PREPEND derived from where the tools really are" \
+  || fail "TMX_PATH_PREPEND wrong: $(docker exec tmxtest-remote sh -c 'grep ^TMX_PATH_PREPEND= /root/.config/tmx/config' 2>&1)"
+
 docker exec tmxtest-remote sh -c \
   'test -x /root/.local/bin/tmx-status && test -e /root/.config/tmx/remote && test -f /root/.config/tmx/projects' \
   && pass "remote container: files installed over ssh" \
@@ -249,12 +273,15 @@ docker exec tmxtest-remote sh -c \
 # session on the remote. No tty here, so the final attach fails; the session
 # must exist anyway.
 docker exec tmxtest-client /root/.local/bin/tmx code-api >/dev/null 2>&1 || true
-docker exec tmxtest-remote tmux has-session -t=code-api 2>/dev/null \
+# tmux is at /opt/local/bin here (see the login-shell setup above), which
+# `docker exec` does not have on its PATH.
+rtmux() { docker exec tmxtest-remote env PATH=/opt/local/bin:/usr/bin:/bin tmux "$@"; }
+
+rtmux has-session -t=code-api 2>/dev/null \
   && pass "tmx code-api on the client created the session on the remote" \
   || fail "no code-api session on the remote"
 
-docker exec tmxtest-remote sh -c \
-  'tmux list-windows -t "=code-api" -F "#{window_name}" | grep -qx shell' \
+rtmux list-windows -t "=code-api" -F "#{window_name}" 2>/dev/null | grep -qx shell \
   && pass "the session has its shell window" \
   || fail "shell window missing"
 
