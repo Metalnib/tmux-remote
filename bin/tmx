@@ -90,7 +90,7 @@ typeset -g TAB=$'\t'
 # Bump when behaviour changes. `tmx version` reports the copy on BOTH machines,
 # because every message you see comes from the remote's copy -- updating the
 # laptop's only changes the ssh-forwarding line.
-typeset -g TMX_VERSION='2026-08-06.4'
+typeset -g TMX_VERSION='2026-08-18'
 
 # Set by resolve_target.
 typeset -g TMX_KIND=''

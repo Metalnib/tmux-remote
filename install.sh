@@ -1,7 +1,7 @@
 #!/bin/sh
 # install.sh -- set up tmx on this machine, or on both machines at once.
 #
-#   ./install.sh                          install here; asks which role
+#   ./install.sh                          asks: this machine, or both over ssh
 #   ./install.sh --role=remote            this machine holds the repos
 #   ./install.sh --role=client            this machine is the one you sit at
 #   ./install.sh --both --remote-host=remote-box
@@ -94,18 +94,49 @@ if [ -z "$ROLE" ]; then
     ROLE=remote
     say "Found $CFG/remote, so installing as the REMOTE."
   elif [ -t 0 ]; then
-    say "Which machine is this?"
-    say "  1) remote  -- holds the repos and runs the sessions"
-    say "  2) client  -- what you sit at; forwards over ssh"
-    printf 'Enter 1 or 2: '
+    # Every option says WHERE the install lands. Asked as "which machine is
+    # this?", with a bare "remote" option, people reasonably read it as "deploy
+    # to the remote" and turn the machine in front of them into the remote.
+    say "What should this do?"
+    say "  1) install on THIS machine, as the client  (what you sit at)"
+    say "  2) install on THIS machine, as the remote  (it holds the repos)"
+    say "  3) install here as the client, then deploy to the remote over ssh"
+    printf 'Enter 1, 2 or 3: '
     read -r answer
     case $answer in
-      1) ROLE=remote ;;
-      2) ROLE=client ;;
-      *) die "expected 1 or 2" ;;
+      1) ROLE=client ;;
+      2) ROLE=remote ;;
+      3) ROLE=client; BOTH=1
+         printf 'ssh nickname of the remote, as in ~/.ssh/config: '
+         read -r RHOST
+         [ -n "$RHOST" ] || die "no nickname given, so there is nothing to deploy to"
+         ;;
+      *) die "expected 1, 2 or 3" ;;
     esac
   else
     die "not a terminal, so I cannot ask: pass --role=remote or --role=client"
+  fi
+fi
+
+# A config with TMX_REMOTE_HOST set belongs to a client: that line is only ever
+# written for the client role. Installing such a machine as the remote stops it
+# forwarding, and every session lands here instead of over there.
+if [ "$ROLE" = remote ] && [ "$UNINSTALL" = 0 ] && \
+   grep -q '^TMX_REMOTE_HOST=' "$CFG/config" 2>/dev/null; then
+  RH_SET=$(sed -n 's/^TMX_REMOTE_HOST=//p' "$CFG/config" | head -1)
+  warn "this machine already forwards to '$RH_SET', so it is set up as a CLIENT"
+  say  "         As the remote it would stop forwarding and run everything here."
+  say  "         To install on '$RH_SET' instead, run:"
+  say  "             $0 --both --remote-host=$RH_SET"
+  if [ -t 0 ]; then
+    printf 'Install THIS machine as the remote anyway? [y/N] '
+    read -r ans
+    case $ans in
+      y|Y|yes|YES) ;;
+      *) die "stopped, nothing changed" ;;
+    esac
+  else
+    die "refusing: pass --role=client, or --both --remote-host=$RH_SET"
   fi
 fi
 

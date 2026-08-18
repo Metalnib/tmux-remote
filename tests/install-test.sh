@@ -4,6 +4,8 @@
 #   tests/install-test.sh            build, run everything, clean up
 #   tests/install-test.sh --keep     leave the containers running afterwards
 #
+# A version-consistency check runs first, without Docker.
+#
 # Part 1 exercises the installer alone in a container: missing dependencies,
 # a clean install of each role, re-running, the legacy migrations, --dry-run,
 # --uninstall, and that `tmx ls` reports real values afterwards.
@@ -35,6 +37,19 @@ cleanup() {
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+# Runs before Docker, because it needs neither Docker nor a container: the
+# release name lives in two files and they drift silently. CHANGELOG.md promises
+# in its own header that they match, and `tmx version` is what tells you whether
+# the two machines are in sync, so a stale TMX_VERSION makes that check lie.
+say "== Version consistency"
+SV=$(sed -n "s/^typeset -g TMX_VERSION='\(.*\)'.*/\1/p" "$REPO/bin/tmx" | head -1)
+CV=$(sed -n 's/^## //p' "$REPO/CHANGELOG.md" | head -1)
+if [ -n "$SV" ] && [ "$SV" = "$CV" ]; then
+  pass "TMX_VERSION and the newest CHANGELOG heading agree ($SV)"
+else
+  fail "TMX_VERSION is '$SV', newest CHANGELOG heading is '$CV'"
+fi
 
 command -v docker >/dev/null 2>&1 || { say "docker not found"; exit 1; }
 
