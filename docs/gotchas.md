@@ -2,7 +2,7 @@
 
 Things that cost real debugging time while building this. All of them were
 measured on the machines, with a pain. Versions where it matters: zsh
-5.9, tmux 3.6a and 3.7b, macOS 15.
+5.9, tmux 3.5a, 3.6a and 3.7b, macOS 15.
 
 Most of these are the *reason* some piece of `bin/tmx` looks odd. If you are
 about to tidy something up, check here first.
@@ -45,13 +45,13 @@ for x in $l; do print -- "$x"; done      # correct
 ```
 
 The loop is then unterminated and the error surfaces many lines later. After a
-bare *assignment* it happens to work, because `done` is still in command
-position, which is why only some instances break. Covered by the linter.
+bare *assignment* it happens to work: `done` is still in command position. That is
+why only some instances break. Covered by the linter.
 
 **4. A `local` value cannot refer to another name in the same statement.**
 
 ```zsh
-local name=$1 var="TMX_AI_${name}"      # var becomes "TMX_AI_" -- silently
+local name=$1 var="TMX_AI_${name}"      # var becomes "TMX_AI_" - silently
 local name=$1; local var="TMX_AI_$name" # correct
 ```
 
@@ -103,7 +103,7 @@ stop reading your profile. Do not set it.
 
 **9. A running tmux server does not re-read its config.** After editing
 `~/.config/tmux/tmux.conf`, run `tmux source-file ~/.config/tmux/tmux.conf`, or
-you will judge the old status line and conclude your change did not work.
+you will look at the old status line and conclude your change did not work.
 
 **10. `new-window -t "=name:2"` fails when index 2 is in use** ("index 2 in
 use"), rather than shifting. `new-window -a -t "=name:1"` inserts after window 1
@@ -111,9 +111,37 @@ and renumbers; `new-window -t "=name"` with no index appends at the next free
 one. Which you want depends on whether disturbing the user's window numbering is
 acceptable.
 
+**11. tmux escapes control bytes in format output, so a tab is not a usable
+delimiter.** Measured on 3.5a, 3.6a and 3.7b:
+
+| byte in `-F` | 3.5a prints | 3.6a, 3.7b print |
+|---|---|---|
+| tab | `_` | a tab |
+| `\001`, `\036`, `\037`, `\177` | `\001` and friends, as four literal characters | the raw byte |
+| newline | `_` | a newline |
+
+The version split is the trap: a tab delimiter works on the machine you build on
+and fails on the one someone else installs to.
+
+It applies to every print path, `list-sessions`, `list-windows`, `list-panes` and
+`display-message` alike, and there is no option to turn it off. A tab-delimited
+record therefore arrives as one field on 3.5a, and everything read from it is
+wrong rather than missing: the directory column shows a whole record, and an
+arithmetic field like `EPOCHSECONDS - created` produces a nonsense uptime.
+
+So the delimiter has to be printable. That brings its own rule, because a session
+name, a window name and a path may all legally contain any printable character. A
+free-form field may only ever be the **last** one. There `read -r a b c rest`
+keeps the remainder whole, delimiters included. If a record needs two free-form
+fields, it needs two queries. `bin/tmx` uses `|`, puts the name last, and looks
+the directory up per session so it stays exact.
+
+tmux can do a fallback itself, which keeps that lookup to one call:
+`#{?@tmx_dir,#{@tmx_dir},#{session_path}}` behaves identically on all three.
+
 ## ssh
 
-**11. `ssh host command` gets a non-interactive, non-login shell.** It reads
+**12. `ssh host command` gets a non-interactive, non-login shell.** It reads
 only `~/.zshenv`, not `~/.zprofile` or `~/.zshrc`, so whatever exports your
 package manager's PATH is skipped and `tmux`, `fzf` and `git` all look
 uninstalled.
@@ -126,7 +154,7 @@ Both are load-bearing; collapsing them breaks any argument containing a space.
 `tmx-status` cannot use that trick, because tmux runs `#()` status commands
 itself with no shell in between, so it sets its own PATH.
 
-**12. `UseKeychain` is Apple-only and is a fatal parse error under other OpenSSH
+**13. `UseKeychain` is Apple-only and is a fatal parse error under other OpenSSH
 builds.** If a third-party `ssh` shadows Apple's on PATH - MacPorts installs to
 `/opt/local/bin/ssh`, which comes first - this single option breaks `ssh` and
 `scp` **machine-wide, for every host**, not just the block it appears in.
@@ -139,20 +167,20 @@ connection still aborts. Persist a passphrase once by hand instead:
 /usr/bin/ssh-add --apple-use-keychain ~/.ssh/your_key
 ```
 
-**13. A reserved LAN address is network-specific.** An mDNS name like
+**14. A reserved LAN address is network-specific.** An mDNS name like
 `remote.local` follows the machine between networks; a DHCP reservation exists
 only on the router that granted it. Keep both, prefer the name, and expect the
 address to go stale exactly when you need the fallback.
 
 ## Files and transport
 
-**14. Neither `scp` nor `cp` gives you the executable bit.** `scp` copies the
+**15. Neither `scp` nor `cp` gives you the executable bit.** `scp` copies the
 *source* mode, and `cp` over an existing file keeps the *destination's* mode. A
 non-executable `tmx-status` makes the `#(exec …)` in the status line fail
 silently, and the result just looks unfinished rather than broken. Check with
 `ls -la` after any install.
 
-**15. Do not trust a viewer that renders glyphs as blank.** Nerd Font icons live
+**16. Do not trust a viewer that renders glyphs as blank.** Nerd Font icons live
 in the Unicode private use area, and plenty of editors, pipes and clipboards
 drop PUA codepoints without complaining. Verify bytes, not appearance:
 
@@ -164,7 +192,7 @@ Expect `e0b2 e0b3 f179 f07b e0a0 f126 f017 f1da`. A tmux config cannot use
 `$'\u…'` escapes, so `.conf` files have to carry literal glyphs; zsh scripts can
 use either.
 
-**16. A format substituted into a `#()` status command is code, not data.**
+**17. A format substituted into a `#()` status command is code, not data.**
 
 tmux expands `#{...}` *into* the command string and hands the result to
 `/bin/sh`, so any value interpolated there is shell syntax:
@@ -180,8 +208,8 @@ With a real attached client, `@tmx_dir=/tmp/it's` produces `sh: unexpected EOF
 while looking for matching`, and the whole right-hand segment vanishes with no
 error reported anywhere. Quote characters shift the arguments, so the wrong
 values are displayed. A `'; command; echo '` payload does **not** execute, but
-only because `exec` replaces the shell before the injected command is reached -
-without the `exec` it is code execution in the tmux server every
+only because `exec` replaces the shell before the injected command is reached.
+Without the `exec` it is code execution in the tmux server every
 `status-interval`.
 
 Pass an identifier whose characters you control (here a session name, restricted
@@ -189,7 +217,7 @@ to letters, digits, `-` and `_`) and have the helper look everything else up
 itself. A `#()` command inherits `$TMUX`, including the socket path, so it can
 call `tmux display-message -p` back and reach the right server.
 
-**17. `${#var}` counts characters, so it depends on the locale.**
+**18. `${#var}` counts characters, so it depends on the locale.**
 
 A glyph check written as `(( ${#SEP} != 1 ))` reports 3 for an intact 3-byte
 glyph whenever the tmux server has no UTF-8 locale: a login item, plain `ssh
@@ -197,7 +225,7 @@ host tmux`, `LANG` not forwarded. The status line then drops to plain text and
 you go looking at a font that was never the problem. Test for what actually goes
 wrong - empty, or a literal `\u` escape - instead of measuring width.
 
-**18. Sanitising a name into a *path* can collide two different things.**
+**19. Sanitising a name into a *path* can collide two different things.**
 
 A worktree directory named from a sanitised branch name means `feat/1234` and
 `feat-1234` map to one path. Adopting whatever is there puts you on the other
@@ -205,7 +233,7 @@ branch's working tree with no warning, and commits land on it. A path derived
 from a lossy transform has to be verified, not trusted: check that what is there
 is really a worktree, and really on the branch that was asked for.
 
-**19. Powerline separator direction is not interchangeable.** `status-left` and
+**20. Powerline separator direction is not interchangeable.** `status-left` and
 the window list are drawn left to right and need **U+E0B0** (solid, pointing
 right). `status-right` is built the other way and needs **U+E0B2** / **U+E0B3**.
 Using the wrong one points the chevrons backwards.

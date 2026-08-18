@@ -1,8 +1,8 @@
-# tmx settings -- copy to ~/.config/tmx/config on BOTH machines and edit.
+# tmx settings - copy to ~/.config/tmx/config on BOTH machines and edit.
 #
 # Plain KEY=value lines. `#` starts a comment, blank lines are ignored, and
 # surrounding quotes are stripped. Unknown keys are ignored, so a typo is
-# silent rather than fatal -- check with `tmx version` if something looks wrong.
+# silent rather than fatal - check with `tmx version` if something looks wrong.
 #
 # The file is PARSED, not sourced. There is no shell expansion, so write
 # /Users/you/bin rather than $HOME/bin, and no command substitution can run
@@ -14,12 +14,13 @@
 # --- the remote machine ----------------------------------------------
 # The ssh host alias tmx forwards to, as it appears in ~/.ssh/config on the
 # client. This is the one setting most people need to change.
-#TMX_REMOTE_HOST=my-remote
+#TMX_REMOTE_HOST=remote-box
 
-# What `hostname -s` prints on the remote. Used only as a fallback way to
-# detect which machine tmx is running on; the marker file
-# ~/.config/tmx/remote is the reliable signal and is what INSTALL.md sets up.
-#TMX_REMOTE_NAME=my-remote
+# The remote's real hostname, as `hostname -s` prints it there. NOT the ssh
+# nickname above. tmx uses it only as a fallback, to tell which machine it runs
+# on. The reliable signal is the marker file ~/.config/tmx/remote, which the
+# install creates.
+#TMX_REMOTE_NAME=bigbox
 
 # Where tmx is installed on the remote. Left as a ~ path on purpose: it is
 # expanded by the remote's shell, not here.
@@ -44,9 +45,9 @@
 # see in `tmx ls` which one is in there. Two different agents can share a
 # session; asking for the same one twice does nothing.
 #
-# An agent's command defaults to its own name, so `tmx --ai=codex` already works
-# if `codex` is on PATH -- you only need a line here to add arguments or point at
-# a different binary. Agent names are letters, digits and underscore.
+# An agent's command defaults to its own name. So `tmx --ai=codex` already works
+# if `codex` is on PATH. Add a line here only to pass arguments, or to point at a
+# different binary. Agent names are letters, digits and underscore.
 #
 # Which agent plain `--ai` picks:
 #TMX_AI_DEFAULT=claude

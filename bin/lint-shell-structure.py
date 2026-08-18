@@ -38,6 +38,10 @@ UNBRACED_MODIFIER = re.compile(r"\$(?:[A-Za-z_]\w*|[0-9@*?$!#-]):[" + MODIFIER_C
 # `while IFS= read -r d; do ... done < <(cmd)`, or `${(f)"$(cmd)"}`.
 SPLIT_LOOP = re.compile(r"\bfor\s+[A-Za-z_]\w*\s+in\s+(?:\$\(|`)")
 
+# A tmux #{...} field and a tab on the same line: tmux escapes control bytes in
+# format output, so a tab delimiter arrives as "_".
+TMUX_FMT_TAB = re.compile(r"(?:\$\{TAB\}|\t)[^\n]*#\{|#\{[^\n]*(?:\$\{TAB\}|\t)")
+
 # A declaration's right-hand sides are all expanded before any is assigned, so a
 # later value cannot refer to an earlier one. bash behaves the same way.
 #
@@ -80,42 +84,76 @@ def self_referencing_decl(segment):
     return hits
 
 
-def strip_quotes_and_comments(line, quote=None):
+def strip_quotes_and_comments(line, state=None):
     """Blank out quoted spans and trailing comments.
 
-    `quote` carries the open quote character across lines, since shell strings
-    may legitimately span them. Returns (code, still_open_quote).
+    `state` carries the open quote and command-substitution nesting across
+    lines, since shell strings may legitimately span them. It is a stack rather
+    than a single character because quotes restart inside $( ): otherwise the
+    opening quote of a nested string reads as closing the outer one, and every
+    "#" after it looks like a comment. Returns (code, state).
     """
+    state = list(state or [])
     out = []
     i = 0
     while i < len(line):
         c = line[i]
-        if quote:
-            if c == "\\" and quote == '"':
-                out.append(" ")
-                i += 2
-                continue
-            if c == quote:
-                quote = None
+        cur = state[-1] if state else None
+        quoted = any(s in "'\"" for s in state)
+
+        if cur == "'":
+            if c == "'":
+                state.pop()
             out.append(" ")
             i += 1
             continue
-        if c == "\\":
+
+        if cur == '"':
+            if c == "\\":
+                out.append("  ")
+                i += 2
+                continue
+            if c == '"':
+                state.pop()
+            elif c == "$" and line[i + 1 : i + 2] == "(":
+                state.append("(")
+                out.append("  ")
+                i += 2
+                continue
             out.append(" ")
+            i += 1
+            continue
+
+        # Unquoted, or inside a $( ) which may itself sit inside a string.
+        if c == "\\":
+            out.append("  ")
+            i += 2
+            continue
+        if c == "$" and line[i + 1 : i + 2] == "(":
+            state.append("(")
+            out.append("  " if quoted else "$(")
             i += 2
             continue
         if c in "'\"":
-            quote = c
+            state.append(c)
             out.append(" ")
+            i += 1
+            continue
+        if c == ")" and cur == "(":
+            state.pop()
+            out.append(" " if quoted else c)
             i += 1
             continue
         if c == "#":
             # A comment only starts at the beginning of a word.
             if i == 0 or line[i - 1].isspace() or line[i - 1] in ";&|(":
-                break
-        out.append(c)
+                # Inside a string, breaking here would throw away the real
+                # closing quote further along the line.
+                if not quoted:
+                    break
+        out.append(" " if quoted else c)
         i += 1
-    return "".join(out), quote
+    return "".join(out), state
 
 
 def blank_single_quotes(line, sq_open):
@@ -168,6 +206,7 @@ def check_lines(lines):
     stack = []  # (reserved_word, lineno)
     in_heredoc = None
     open_quote = None  # carried across lines
+    quote_state = []  # quote + $( ) nesting, carried across lines
     quote_started = 0
     sq_open = False  # single-quote state, tracked separately for the modifier rule
 
@@ -213,6 +252,18 @@ def check_lines(lines):
                     )
                 )
 
+        if TMUX_FMT_TAB.search(expandable):
+            errors.append(
+                (
+                    n,
+                    "a tab is not a usable delimiter in a tmux `-F` format: tmux "
+                    "escapes control bytes in format output, so the tab arrives "
+                    "as `_`. Use a printable delimiter, and make the one field "
+                    "that may contain it the last one",
+                    line.strip(),
+                )
+            )
+
         for m in SPLIT_LOOP.finditer(expandable):
             errors.append(
                 (
@@ -226,7 +277,8 @@ def check_lines(lines):
             )
 
         was_open = open_quote
-        code, open_quote = strip_quotes_and_comments(line, open_quote)
+        code, quote_state = strip_quotes_and_comments(line, quote_state)
+        open_quote = next((c for c in reversed(quote_state) if c in "'\""), None)
         if open_quote and not was_open:
             quote_started = n
         if was_open:
@@ -320,6 +372,17 @@ SELF_TEST = [
     ("for r in $TMX_ROOTS; do print -- $r; done", None),
     ('for d in ${(f)"$(list_dirs)"}; do print -- $d; done', None),
     ('print -- "for d in $(list_dirs)"', "splits on IFS"),
+    # tmux escapes control bytes in format output, so a tab delimiter arrives
+    # as "_" and every field after the first collapses into one
+    ('tmux list-sessions -F "#{session_name}${TAB}#{session_path}"', "tmux `-F`"),
+    ('tmux list-windows -a -F "#{window_index}\t#{window_name}"', "tmux `-F`"),
+    ('tmux list-sessions -F "#{session_created}|#{session_name}"', None),
+    ('print -- "SESSION${TAB}DIR${TAB}BRANCH"', None),
+    ('# name TAB dir TAB attached', None),
+    # quotes restart inside $( ), so a nested string must not close the outer
+    # one -- and a "#" after the nested quote is not a comment
+    ('IFS=\'|\' read -r a b <<<"$(cmd -p \\\n  "#{x}|#{y}" \\\n  2>/dev/null)"', None),
+    ('x="$(cmd "a|b")"\nprint -- ok', None),
     ("# for d in $(list_dirs); do", None),
     # zsh assigns a whole declaration at once
     ('local name=$1 var="TMX_AI_${name}"', "SAME declaration"),
@@ -348,7 +411,7 @@ SELF_TEST = [
 def self_test():
     failures = 0
     for src, want in SELF_TEST:
-        errors = check_lines([src + "\n"])
+        errors = check_lines([l + "\n" for l in src.split("\n")])
         msgs = " ".join(m for _, m, _ in errors)
         if want is None:
             ok = not errors

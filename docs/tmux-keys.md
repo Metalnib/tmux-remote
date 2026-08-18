@@ -120,8 +120,8 @@ multiple lines pasted at a shell prompt will *run*, and a big paste is slow.
 ### Big selections
 
 OSC 52 is an escape sequence, and escape sequences get truncated once the
-payload is large - twice over when a local tmux sits in the middle. So there is
-a file bridge for anything sizeable:
+payload is large (a local tmux in the middle adds a second limit). So there is a
+file bridge for anything big:
 
 | Step | Where | Keys / command |
 |---|---|---|
@@ -131,15 +131,12 @@ a file bridge for anything sizeable:
 | | remote | `prefix P` |
 
 `Y` writes the selection to `~/.cache/tmx/clip.txt` on the remote and tells you
-how big it was. `tmx clip` on the laptop fetches that over ssh straight onto
+the size. `tmx clip` on the laptop fetches that over ssh straight onto
 your clipboard. `tmx clip scp` prints the raw `scp` line if you want the file
 itself rather than the clipboard.
 
 Use plain `y` for ordinary copies - it is one keystroke and needs nothing on the
 other end. Reach for `Y` when `y` gives you a truncated paste.
-
-Both machines are Macs, so **Universal Clipboard** is also there if Handoff is
-on: `pbcopy < file` on the remote, ⌘V on the laptop, no size ceiling at all.
 
 ## Popups
 
@@ -187,9 +184,8 @@ rather not count keypresses. Press it and the laptop's tmux stops reacting to
 remote. Press `F12` again to take the laptop back. It only exists on the client
 - there is nothing to disable on the remote.
 
-`prefix f` on the laptop opens each remote session in its own local window, so
-one local window is one remote session and it stays obvious what is nested in
-what.
+`prefix f` on the laptop opens each remote session in its own local window. One
+local window is one remote session, so it is always clear what is nested in what.
 
 ## Both screens at once
 

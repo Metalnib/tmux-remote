@@ -142,13 +142,15 @@ cmd_right() {
   local session=${1-}
   [[ -n $session ]] || return 0
 
-  local dir spath attached activity created
-  IFS=$TAB read -r dir spath attached activity created <<<"$(tmux display-message -p \
+  # A tab in a tmux format comes back as "_", so the delimiter is printable and
+  # the one field that may contain it -- the directory -- comes last, where read
+  # keeps the remainder whole. tmux applies the session_path fallback itself.
+  local dir attached activity created
+  IFS='|' read -r attached activity created dir <<<"$(tmux display-message -p \
     -t "=${session}:" \
-    "#{@tmx_dir}${TAB}#{session_path}${TAB}#{session_attached}${TAB}#{session_activity}${TAB}#{session_created}" \
+    "#{session_attached}|#{session_activity}|#{session_created}|#{?@tmx_dir,#{@tmx_dir},#{session_path}}" \
     2>/dev/null)"
 
-  [[ -n $dir ]] || dir=$spath
   local host=${$(hostname -s 2>/dev/null):-remote}
   [[ -n $attached ]] || attached=0
   [[ -n $activity ]] || activity=$EPOCHSECONDS

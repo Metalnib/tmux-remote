@@ -56,8 +56,8 @@ typeset -U path
 path=( ${(s.:.)TMX_PATH_PREPEND} $HOME/.local/bin /usr/bin /bin /usr/sbin /sbin $path )
 
 # --- Configuration (override in the environment or the config file) ---
-: ${TMX_REMOTE_HOST:=tmx-remote}      # ssh host alias for the remote
-: ${TMX_REMOTE_NAME:=tmx-remote}      # what `hostname -s` prints there
+: ${TMX_REMOTE_HOST:=remote-box}      # ssh host alias for the remote
+: ${TMX_REMOTE_NAME:=remote-box}      # what `hostname -s` prints there
 : ${TMX_PROJECTS_FILE:=$TMX_CONFIG_DIR/projects}
 : ${TMX_DOCS_DIR:=$TMX_CONFIG_DIR/docs}
 : ${TMX_WORKTREE_DIRNAME:=.worktrees}
@@ -90,7 +90,7 @@ typeset -g TAB=$'\t'
 # Bump when behaviour changes. `tmx version` reports the copy on BOTH machines,
 # because every message you see comes from the remote's copy -- updating the
 # laptop's only changes the ssh-forwarding line.
-typeset -g TMX_VERSION='2026-08-06.2'
+typeset -g TMX_VERSION='2026-08-06.4'
 
 # Set by resolve_target.
 typeset -g TMX_KIND=''
@@ -271,10 +271,16 @@ list_dirs() {
 }
 
 # --- Session queries -------------------------------------------------
-# name TAB dir TAB attached TAB activity TAB created TAB session_path
+# attached | activity | created | name
+#
+# tmux escapes control bytes in format output, so a tab arrives as "_" and the
+# delimiter has to be printable. A session name may legally contain "|", so it
+# is the last field, where read keeps the remainder whole. The directory is not
+# in the record at all: it is looked up per session, which keeps it exact.
+# See docs/gotchas.md.
 list_sessions() {
   tmux list-sessions -F \
-    "#{session_name}${TAB}#{@tmx_dir}${TAB}#{session_attached}${TAB}#{session_activity}${TAB}#{session_created}${TAB}#{session_path}" \
+    "#{session_attached}|#{session_activity}|#{session_created}|#{session_name}" \
     2>/dev/null || true
 }
 
@@ -291,21 +297,24 @@ session_opt() {
 # the derived one (an alias, or a hand-renamed session), so the directory is the
 # only reliable identity.
 session_for_dir() {
-  local want=${1:A} n d rest
-  while IFS=$TAB read -r n d rest; do
-    [[ -n $n && -n $d ]] || continue
+  local want=${1:A} att act cre n d
+  while IFS='|' read -r att act cre n; do
+    [[ -n $n ]] || continue
+    d=$(session_dir "$n")
+    # An empty dir would resolve to the current directory and match anything.
+    [[ -n $d ]] || continue
     [[ ${d:A} == $want ]] && { print -r -- $n; return 0 }
   done < <(list_sessions)
   return 1
 }
 
+# Trailing colon required: display-message -t "=name" is a pane target and comes
+# back empty, while "=name:" resolves the session's current pane. tmux does the
+# session_path fallback, so this stays one call and one exact target.
 session_dir() {
-  local d=$(session_opt "$1" @tmx_dir)
-  if [[ -z $d ]]; then
-    # Trailing colon required: display-message -t "=name" is a pane target and
-    # comes back empty, while "=name:" resolves the session's current pane.
-    d=$(tmux display-message -p -t "=${1}:" '#{session_path}' 2>/dev/null) || d=''
-  fi
+  local d
+  d=$(tmux display-message -p -t "=${1}:" \
+    '#{?@tmx_dir,#{@tmx_dir},#{session_path}}' 2>/dev/null) || d=''
   print -r -- $d
 }
 
@@ -369,8 +378,7 @@ add_ai_window() {
   # the shell whenever that index is free.
   tmux new-window -d -t "=${name}:2" -n "$agent" "${where[@]}" "$ai_window_cmd" 2>/dev/null && return 0
 
-  # Index 2 is a window you opened yourself. Append instead of renumbering
-  # your windows out from under you.
+  # Index 2 is a window you opened yourself. Append instead of renumbering it.
   tmux new-window -d -t "=$name" -n "$agent" "${where[@]}" "$ai_window_cmd" && return 0
 
   warn "could not create the '$agent' window; the session is otherwise fine"
@@ -655,40 +663,61 @@ Rename one branch, or remove that worktree: git worktree remove ${wt_dir}"
 }
 
 # --- Subcommand: ls --------------------------------------------------
-# Every window of every session in ONE tmux call, rather than one call per
-# session. Fills two lookups:
+# column(1) is missing from minimal Linux images, and `tmx ls` is one of the three
+# commands anyone actually uses, so degrade to tab-separated instead of dying.
+format_table() {
+  if have column; then
+    column -t -s $TAB
+  else
+    cat
+  fi
+}
+
+
+# Fills two lookups:
 #   TMX_WIN_COMPACT[session] -> "1:shell* 2:ai"        for the default table
 #   TMX_WIN_ROWS[session]    -> one "idx name flag TAB cmd" line per window
+#
+# One tmux call per session, because the session name cannot travel inside the
+# record: a window name may contain the delimiter and has to be the last field.
+# The name comes from the loop instead, so it is always exact.
 load_windows() {
   typeset -gA TMX_WIN_COMPACT=() TMX_WIN_ROWS=()
-  local s idx wname wactive wcmd flag
-  while IFS=$TAB read -r s idx wname wactive wcmd; do
-    [[ -n $s ]] || continue
+  local s idx wname wactive wcmd flag att act cre
+  local -a names=()
+  while IFS='|' read -r att act cre s; do
+    [[ -n $s ]] && names+=( "$s" )
+  done < <(list_sessions)
 
-    # Some agents ship as a version-numbered binary, so pane_current_command
-    # reads like "2.1.222". The window name is the agent name. If the pattern
-    # ever stops matching, the raw name shows instead; nothing breaks.
-    if [[ $wcmd == [0-9]*.[0-9]* ]]; then
-      wcmd=$wname
-    fi
+  for s in $names; do
+    while IFS='|' read -r idx wactive wcmd wname; do
+      [[ -n $idx ]] || continue
 
-    if [[ $wactive == 1 ]]; then flag='*'; else flag=' '; fi
+      # Some agents ship as a version-numbered binary, so pane_current_command
+      # reads like "2.1.222". The window name is the agent name. If the pattern
+      # ever stops matching, the raw name shows instead; nothing breaks.
+      if [[ $wcmd == [0-9]*.[0-9]* ]]; then
+        wcmd=$wname
+      fi
 
-    if [[ -n ${TMX_WIN_COMPACT[$s]-} ]]; then
-      TMX_WIN_COMPACT[$s]="${TMX_WIN_COMPACT[$s]} ${idx}:${wname}${flag% }"
-    else
-      TMX_WIN_COMPACT[$s]="${idx}:${wname}${flag% }"
-    fi
-    TMX_WIN_ROWS[$s]="${TMX_WIN_ROWS[$s]-}  ${idx} ${wname} ${flag}${TAB}${wcmd}"$'\n'
-  done < <(tmux list-windows -a \
-    -F "#{session_name}${TAB}#{window_index}${TAB}#{window_name}${TAB}#{window_active}${TAB}#{pane_current_command}" \
-    2>/dev/null || true)
+      if [[ $wactive == 1 ]]; then flag='*'; else flag=' '; fi
+
+      if [[ -n ${TMX_WIN_COMPACT[$s]-} ]]; then
+        TMX_WIN_COMPACT[$s]="${TMX_WIN_COMPACT[$s]} ${idx}:${wname}${flag% }"
+      else
+        TMX_WIN_COMPACT[$s]="${idx}:${wname}${flag% }"
+      fi
+      TMX_WIN_ROWS[$s]="${TMX_WIN_ROWS[$s]-}  ${idx} ${wname} ${flag}${TAB}${wcmd}"$'\n'
+    done < <(tmux list-windows -t "=${s}" \
+      -F "#{window_index}|#{window_active}|#{pane_current_command}|#{window_name}" \
+      2>/dev/null || true)
+    done
   return 0
 }
 
 cmd_ls() {
   local -a rows
-  local name dir att act cre spath branch wt wtflag
+  local name dir att act cre branch wt wtflag
   integer tree=0
 
   local a
@@ -701,8 +730,9 @@ cmd_ls() {
 
   load_windows
 
-  while IFS=$TAB read -r name dir att act cre spath; do
-    [[ -n $dir ]] || dir=$spath
+  while IFS='|' read -r att act cre name; do
+    [[ -n $name ]] || continue
+    dir=$(session_dir "$name")
     branch=$(git_branch_of "$dir")
     [[ -n $branch ]] || branch='-'
     wt=$(session_opt "$name" @tmx_worktree)
@@ -762,14 +792,14 @@ cmd_ls() {
         print -r -- ${row%$TAB*}          # drop the compact WINDOWS field
         print -rn -- "${TMX_WIN_ROWS[${row%%$TAB*}]-}"
       done
-    } | column -t -s $TAB \
+    } | format_table \
       | awk '{ sub(/[ \t]+$/, ""); if (NR > 2 && $0 !~ /^ /) print ""; print }'
     return 0
   fi
 
   { print -- "SESSION${TAB}DIR${TAB}BRANCH${TAB}WT${TAB}LAST ATTACHED${TAB}UP${TAB}WINDOWS"
     print -rl -- $rows
-  } | column -t -s $TAB
+  } | format_table
 }
 
 # --- Subcommand: kill ------------------------------------------------
@@ -995,10 +1025,11 @@ cmd_pick() {
 
   local -a rows
   local -A have_session
-  local name dir att act cre spath note disp d slug
+  local name dir att act cre note disp d slug
 
-  while IFS=$TAB read -r name dir att act cre spath; do
-    [[ -n $dir ]] || dir=$spath
+  while IFS='|' read -r att act cre name; do
+    [[ -n $name ]] || continue
+    dir=$(session_dir "$name")
     have_session[$name]=1
     note=$(rel_or_attached "$att" "$act")
     disp=$(printf '  %-28s %-42s %s' "$name" "${dir/#$HOME/~}" "$note")
@@ -1040,8 +1071,7 @@ cmd_preview() {
   case $kind in
     session)
       # fzf calls this after the listing was built, so the session may be gone.
-      # Check exactly first: session_opt uses a bare target, which would
-      # prefix-match a longer sibling and preview the wrong directory.
+      # Say so, instead of drawing an empty pane.
       if ! session_exists "$key"; then
         print -r -- "session: $key"
         print -r -- "(gone -- killed since the list was built)"

@@ -1,36 +1,56 @@
 # Install
 
 Written for macOS with MacPorts, which is what it was tested on. Nothing depends
-on MacPorts specifically: the scripts need `tmux`, `fzf`, `git` and `zsh` on
-`PATH`, and `TMX_PATH_PREPEND` in the config file is how you tell them where
-those live. Substitute your own package manager's install command below.
+on MacPorts specifically, so substitute your own package manager's install command
+below. `TMX_PATH_PREPEND` in the config file is how you tell the scripts where
+your tools live.
 
 Two machines:
 
-- **client machine** - the client. Any terminal, zsh.
-- **remote machine** - the remote, `remote.local` / `192.168.1.10`. Holds the
-  repos and runs the tmux server that matters.
+- **the client** - whatever you sit at. Any terminal, zsh.
+- **the remote** - holds the repos and runs the tmux server that matters. You reach
+  it by the nickname `remote-box`, which points at `remote.local` or
+  `192.168.1.10`.
 
 Same user on both. Assume this repo is checked out at `~/tmux-remote` on
 whichever machine you are working on.
+
+## The quick way
+
+`./install.sh` does this whole page. From the client, once `ssh remote-box`
+(the alias from `ssh/config.client`) logs in without a password:
+
+```sh
+~/tmux-remote/install.sh --both --remote-host=remote-box
+```
+
+Or run it on each machine separately and it asks which role that machine plays.
+It checks dependencies per role, derives `TMX_PATH_PREPEND` from where your tools
+really are, backs up anything it replaces, and never overwrites a `config` or
+`projects` you have edited. `--dry-run` shows the plan, `--uninstall` removes
+what it installed.
+
+The rest of this page is the same install by hand, with the reasons attached.
+Worth a read when something misbehaves, even if the script did the work.
 
 ---
 
 ## 0. Prerequisites
 
-Already installed on both machines, listed for rebuilds:
+On the **remote**: `zsh`, `tmux`, `fzf`, `git`. On the **client**: only `zsh`
+and `ssh`; add tmux there if you also want local sessions and the F12 nesting
+setup. With MacPorts:
 
 ```sh
-sudo port install tmux fzf git
+sudo port install tmux fzf git      # remote (zsh ships with macOS)
 ```
 
-`tmux` needs to be 3.2 or newer - check with `tmux -V`. Built and tested against
-3.6a and 3.7b.
+`tmux` needs to be 3.2 or newer - check with `tmux -V`.
 
-A Nerd Font must be installed and selected in:
+Install a Nerd Font and select it in:
 
-- the terminal on the client. In iTerm2: Settings > Profiles > Text > Font;
-  other terminals have an equivalent
+- the terminal on the client (the exact iTerm2 setting is in §2.5; other terminals
+  have an equivalent)
 - whatever terminal you use on the remote's own screen
 
 Nerd Fonts are not in MacPorts; they are a manual font install. If you ever end
@@ -38,23 +58,21 @@ up on a terminal without one, `TMX_GLYPHS=0` gives you plain-text labels instead
 of icons, with no other change in behaviour.
 
 **Check the font before blaming anything else.** Installing the font is not
-enough; the terminal profile has to be pointed at it, and it is easy to do that
-on one machine and forget the other:
+enough; you also have to select it in the terminal profile, and it is easy to do
+that on one machine and forget the other:
 
 ```sh
 printf '\ue0b0 \ue0b2 \ue0b3 \ue0a0 \uf179 \uf07b \uf126 \uf017 \uf1da\n'
 ```
 
-You should see nine icons: two solid arrows, a thin arrow, a branch, an apple, a
-folder, a fork, a clock and a history arrow. Boxes, question marks or blank
-space mean the font selected in that terminal has no Nerd Font glyphs -- the
-status line will show the same boxes. Note the check has to be run **in the
-terminal you actually use**, and on **both** machines, since the remote's own
-screen renders the same status line.
+Nine icons means that font is fine. Boxes, question marks or blank space mean it
+has no Nerd Font glyphs, and the status line shows the same boxes. Run the check
+**in the terminal you actually use**, and on **both** machines, since the remote's
+own screen renders the same status line.
 
 ---
 
-## 1. remote machine (the remote)
+## 1. The remote machine
 
 Run this on the remote.
 
@@ -143,7 +161,7 @@ grep -q '.local/bin' ~/.zshenv 2>/dev/null || \
 Check it from the client - this is the environment that actually matters:
 
 ```sh
-ssh tmx-remote 'echo $PATH; command -v tmux fzf git'
+ssh remote-box 'echo $PATH; command -v tmux fzf git'
 ```
 
 ### 1.5 Enable Remote Login
@@ -151,15 +169,16 @@ ssh tmx-remote 'echo $PATH; command -v tmux fzf git'
 System Settings → General → Sharing → **Remote Login** on. Limit it to your own
 user while you are there.
 
-### 1.6 Check the hostname
+### 1.6 Note the hostname
 
 ```sh
 hostname -s
 ```
 
-If this prints something other than `tmx-remote`, nothing breaks - the marker
-file from 1.3 is what role detection uses first. Only relevant if you ever
-delete it.
+Whatever this prints is the machine's own name. It has nothing to do with the
+`remote-box` ssh nickname, and nothing here depends on it: the marker file from
+1.3 is what role detection uses. It matters only if you delete that file, and
+then you set `TMX_REMOTE_NAME` in `~/.config/tmx/config` to this value.
 
 ### 1.7 Smoke test, locally on the remote
 
@@ -171,9 +190,9 @@ zsh -n ~/.local/bin/tmx && zsh -n ~/.local/bin/tmx-status && echo "syntax ok"
 ```
 
 `zsh -n` is the authority, but it only catches syntax. There is a second check for
-the classes it cannot see at all: a block terminator left in argument position, an
-unbraced `$var:` taking a history modifier, `for x in $(cmd)` word-splitting on
-IFS, and a declaration whose value refers to a name assigned in the same
+the classes it cannot see at all: a block terminator left in argument position; an
+unbraced `$var:` taking a history modifier; `for x in $(cmd)` word-splitting on
+IFS; and a declaration whose value refers to a name assigned in the same
 statement.
 
 That one is a development aid, not an install step. It needs `python3`, which
@@ -202,7 +221,7 @@ You should get a blue status bar saying REMOTE and one window, `shell`. Add
 
 ---
 
-## 2. client machine (the client)
+## 2. The client machine
 
 Run this on the laptop.
 
@@ -212,7 +231,7 @@ A dedicated key for this one hop, rather than reusing a general-purpose one:
 
 ```sh
 ssh-keygen -t ed25519 -a 100 -f ~/.ssh/client_to_remote_ed25519 \
-  -C "client -> tmx-remote"
+  -C "client -> remote-box"
 ```
 
 - `ed25519` is the strong choice - no key size to pick, and shorter and faster
@@ -223,8 +242,8 @@ ssh-keygen -t ed25519 -a 100 -f ~/.ssh/client_to_remote_ed25519 \
   of the file alone is not enough to reach the remote.
 
 If you set a passphrase, `AddKeysToAgent yes` in the ssh config gets you one
-prompt per agent lifetime. To have macOS remember it across reboots, do that
-once by hand - and note it must be **Apple's** ssh-add, since MacPorts' OpenSSH
+prompt per agent lifetime. To have macOS remember it across reboots, run this
+command once - and note it must be **Apple's** ssh-add, since MacPorts' OpenSSH
 has no keychain support:
 
 ```sh
@@ -232,11 +251,11 @@ has no keychain support:
 ```
 
 The config deliberately does not use the `UseKeychain` option to achieve this.
-That option exists only in Apple's ssh, and with MacPorts installed
-`/opt/local/bin/ssh` comes first on `PATH` - where an unknown option is a
-**fatal** parse error that breaks every `ssh` and `scp` on the machine,
-including connections to completely unrelated hosts. `IgnoreUnknown` does not
-save you, because it only applies to connections matching the block it sits in.
+That option exists only in Apple's ssh. With MacPorts installed,
+`/opt/local/bin/ssh` comes first on `PATH`, and there an unknown option is a
+**fatal** parse error. It breaks every `ssh` and `scp` on the machine, including
+connections to completely unrelated hosts. `IgnoreUnknown` does not save you,
+because it only applies to connections matching the block it sits in.
 
 This key lives only on the client. The remote's own `~/.ssh/id_ed25519` is that
 machine's git key and has nothing to do with this - only the `.pub` half of the
@@ -274,8 +293,8 @@ for you.
 Then check both routes:
 
 ```sh
-ssh tmx-remote     hostname   # via mDNS
-ssh tmx-remote-ip  hostname   # via 192.168.1.10
+ssh remote-box     hostname   # via mDNS
+ssh remote-box-ip  hostname   # via 192.168.1.10
 ```
 
 ### 2.3 tmux config
@@ -299,8 +318,7 @@ chmod +x ~/.local/bin/tmx
 cp ~/tmux-remote/docs/*.md ~/.config/tmx/docs/
 
 # Same settings file as on the remote. TMX_REMOTE_HOST is the one that matters
-# here: it is the ssh host alias this machine forwards to. Do NOT create
-# ~/.config/tmx/remote on the client, or tmx will try to ssh to itself.
+# here: it is the ssh host alias this machine forwards to.
 cp ~/tmux-remote/config/config.example ~/.config/tmx/config
 
 grep -q '.local/bin' ~/.zshenv 2>/dev/null || \
@@ -309,8 +327,8 @@ grep -q '.local/bin' ~/.zshenv 2>/dev/null || \
 zsh -n ~/.local/bin/tmx && echo "syntax ok"
 ```
 
-Do **not** create `~/.config/tmx/remote` here. That file is what tells `tmx` it
-is on the remote.
+Do **not** create `~/.config/tmx/remote` here. That file is what tells `tmx` it is
+on the remote, so `tmx` on this machine would try to ssh to itself.
 
 ### 2.5 iTerm2 settings
 
@@ -334,7 +352,7 @@ tmx ls
 ```
 
 That should ssh to the remote, run `tmx ls` there, and print the table - no
-manual `ssh tmx-remote` step.
+manual `ssh remote-box` step.
 
 ```sh
 tmx
@@ -357,7 +375,7 @@ tmx ~/code/api
 tmx code-api          # same session, not a second one
 
 # worktrees
-cd-into-a-repo-on-the-tmx-remote && tmx wt feat/1234
+cd-into-a-repo-on-the-remote-box && tmx wt feat/1234
 
 # nesting is unambiguous
 # start a local session with C-b, attach to a remote one inside it:
@@ -389,9 +407,9 @@ silently rather than complain.
 **Do not copy `config/projects` or `config/config.example` again.** Both are
 templates you edited during install, and `~/.config/tmx/projects` and
 `~/.config/tmx/config` are now yours. Overwriting them with the repo's generic
-versions points the picker at directories you do not have, and resets your
-remote host alias - the picker just goes quiet, with no error to explain why. If
-a new setting has been added, read the example and add that one line by hand:
+versions points the picker at directories you do not have, and resets your remote
+host alias. The picker then just goes quiet, with no error to explain why. If a
+new version adds a setting, read the example and add that one line by hand:
 
 ```sh
 diff ~/.config/tmx/config ~/tmux-remote/config/config.example
@@ -415,6 +433,6 @@ rm -rf ~/.config/tmx
 mv ~/.config/tmux/tmux.conf.bak ~/.config/tmux/tmux.conf   # if you had one
 ```
 
-Remove the `Host tmx-remote` / `Host tmx-remote-ip` block from `~/.ssh/config`
+Remove the `Host remote-box` / `Host remote-box-ip` block from `~/.ssh/config`
 on the laptop. Running tmux sessions on the remote are untouched by any of this
-- `tmux kill-server` there if you want a clean slate.
+- run `tmux kill-server` there if you want them gone too.

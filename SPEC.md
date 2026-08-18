@@ -1,9 +1,8 @@
 # Design notes
 
-What `tmx` does, and why it does it that way. The reasoning matters more than
-the rules: most of these choices exist because of something specific about tmux,
-zsh or ssh, and undoing one tends to break something that is not obviously
-related.
+What `tmx` does, and why it does it that way. The reasoning matters more than the
+rules. Most of these choices exist because of something specific about tmux, zsh
+or ssh. Undoing one tends to break something that is not obviously related.
 
 - [docs/gotchas.md](docs/gotchas.md) has the measured behaviour behind them.
 - [CHANGELOG.md](CHANGELOG.md) has what changed and when.
@@ -25,13 +24,15 @@ LAN, a VPN, a public address, a jump host. Nothing in the scripts assumes
 otherwise. It was built and tested on a LAN, which is the only reason
 `ssh/config.client` ships LAN-flavoured defaults (mDNS name, an address
 fallback, `AddressFamily inet`, no jump host) - those are conveniences to edit,
-not requirements. Over a higher-latency link expect tmux redraws to feel it;
-exposing ssh beyond a trusted network is your call to secure. mosh is not used.
+not requirements. Over a higher-latency link tmux redraws get slower. If
+you expose ssh beyond a trusted network, securing it is your job. mosh is not
+used.
 
 Built and tested on macOS with MacPorts, which is why `/opt/local/bin` is the
 default for `TMX_PATH_PREPEND`. Nothing depends on MacPorts specifically: the
-scripts need `tmux`, `fzf`, `git` and `zsh` on `PATH`, and that one setting is
-how you tell them where those live. See §7.
+remote needs `zsh`, `tmux`, `fzf` and `git` on `PATH` (the client only `zsh` and
+`ssh`, since it forwards before any of those run), and that one setting is how
+you tell the scripts where those live. See §7.
 
 ## 2. Session model
 
@@ -49,21 +50,18 @@ how you tell them where those live. See §7.
    accented names survive; only punctuation is replaced.
 
 **Why sanitise at all.** tmux silently rewrites `.` and `:` in a session name to
-`_`: `new-session -s a.b` stores `a_b`, and every later `has-session -t=a.b`
-then fails, so create-or-attach breaks and the slug no longer predicts the
-stored name. Those two characters *must* be replaced by `tmx` itself. Everything
-else - spaces, parens, `/`, `$`, non-ASCII letters - tmux keeps verbatim, and
-`=name`, `=name:2` and `=name:shell` all resolve fine.
+`_`, so create-or-attach breaks and the slug stops predicting the stored name
+(docs/gotchas.md #6). Those two characters *must* be replaced by `tmx` itself.
+Everything else tmux keeps verbatim.
 
 Replacing the rest is a usability decision rather than a tmux requirement.
-Session names are things you type, and `tmx` prints them as runnable commands in
-its suggestions and error messages; preserving them verbatim would mean quoting
-at every one of those sites while still being lossy on `.` and `:`, so it buys
-no fidelity. The invariant instead is that **a session name is only letters,
+Session names are things you type. `tmx` also prints them as runnable commands in
+suggestions and error messages. Keeping them verbatim would mean quoting at every
+one of those sites, and it would still be lossy on `.` and `:`, so it gains
+nothing. The invariant instead is that **a session name is only letters,
 digits, `-` and `_`**, and is therefore always typeable unquoted. `_` is kept
 rather than replaced, so that adding this rule does not rename existing
-sessions. Where two directories still collide on one name, `tmx` refuses and
-prints both paths.
+sessions.
 
 Examples:
 
@@ -90,7 +88,7 @@ wrong session.
 
 ### 2.2 Worktree sessions
 
-`tmx wt <branch>` (run from inside a repo) or `tmx wt <dir> <branch>`:
+`tmx wt <branch>` (run from inside a repo) or `tmx wt <branch> <repo-dir>`:
 
 - Session name: `<repo-slug>--<branch-slug>`, where `branch-slug` maps `/` and
   `.` to `-`, case preserved.
@@ -103,9 +101,9 @@ Worktree location: `<repo-parent>/.worktrees/<repo-basename>--<branch-slug>`.
 
 The `<repo-basename>--` component is a deliberate refinement of the
 flat-worktree decision. Without it, `~/code/api` and `~/code/web` both branching
-`feat/x` would resolve to the same path `~/code/.worktrees/feat-x`. Flat, one
-level deep, and `.worktrees` being a dotdir means the picker never lists
-worktrees as plain dirs - they appear only as live sessions.
+`feat/x` would resolve to the same path `~/code/.worktrees/feat-x`. The layout is flat, one level
+deep. `.worktrees` is a dotdir, so the picker never lists worktrees as plain
+dirs. They appear only as live sessions.
 
 ### 2.3 Window layout
 
@@ -126,14 +124,13 @@ configuration when `codex` is on `PATH`; `TMX_AI_<agent>` in the config file
 overrides that, arguments and quoting preserved. Agent names are restricted to
 letters, digits and underscore because the name becomes both a tmux window name
 and part of a variable name. The window is named after the agent rather than a
-generic `ai`, which makes `tmx ls` informative, lets two agents share a session,
-and keeps "asking for the same agent twice" a no-op.
+generic `ai`. That makes `tmx ls` informative and lets two agents share a
+session. Asking for the same agent twice is a no-op.
 
 `--ai` is also additive on a session that is already running, which is the one
-case where `tmx` touches an existing session's layout. It adds the window at
-index 2 when that index is free, appends otherwise rather than renumbering
-windows you opened yourself, and never creates a second window for the same
-agent. It is created with `-d`, so enabling it does not move you off your shell.
+case where `tmx` touches an existing session's layout. It adds the window at index 2
+when that index is free. Otherwise it appends, rather than renumbering windows
+you opened yourself. It never creates a second window for the same agent. It is created with `-d`, so enabling it does not move you off your shell.
 
 Extra windows and panes are ad hoc and inherit the current pane's cwd. The agent
 window is created with `remain-on-exit off`; quitting the agent closes the
@@ -202,7 +199,7 @@ Rules:
 Both servers run at once. Nesting is permitted, and both use the **default
 `C-b`**.
 
-Both servers use `C-b`. Giving the remote its own prefix would make every
+Giving the remote its own prefix would make every
 keypress unambiguous, but it costs muscle memory and means tmux documentation no
 longer applies as written. The remote is also used directly from its own screen,
 where a non-default prefix would apply as well. One prefix everywhere, and the
@@ -214,19 +211,19 @@ is attached from inside a local one, the laptop's server sees `C-b` first.
 - **`C-b C-b`** - `send-prefix` is bound on both servers, so double-tapping
   forwards one prefix to the inner session. `C-b c` makes a window on the
   laptop; `C-b C-b c` makes one on the remote. This is the primary mechanism.
-- **`F12` toggle** on the local server, promoted from belt-and-braces to the
-  alternative: turns the local key table off, greys the local status bar and
+- **`F12` toggle** on the local server, the alternative mechanism (it started as
+  a backup): turns the local key table off, greys the local status bar and
   shows `CLIENT keys off`, so plain `C-b` falls through to the remote for as
   long as you want. Press again to restore.
 - **Colour split:** the two servers get distinct status-bar palettes and an
   explicit label - `CLIENT` on the client's server, `REMOTE` on the remote.
-  Different accent colour, different background. With a shared prefix these no
-  longer tell you which key to press, but they remain how you know which machine
-  you are looking at.
+  Different accent colour, different background. With a shared prefix the colours
+  cannot tell you which key to press. They are how you know which machine you are
+  looking at.
 - **No nest guard.** `tmx` does not refuse to run inside a local tmux session;
   nesting is a supported way to work, one local window per remote session
-  (`prefix f` on the laptop uses `new-window`, not a popup, so the remote
-  session is not living inside something that can close under it).
+  (`prefix f` on the laptop uses `new-window`, not a popup. So the remote session
+  is not living inside something that can close under it.)
 - Status style uses **Nerd Font glyphs** (powerline separators, branch and
   worktree icons).
 
@@ -259,23 +256,22 @@ detach.
 three places: `status-left` and `window-status-current-format` in both `.conf`
 files, and the `status-right` segments in `tmux-status`. A tmux config cannot
 use `$'\u…'` escapes, so the `.conf` files must carry literals; `tmux-status`
-carries literals too but could use escapes if a transport ever strips them
-again. Separator direction differs by side and is not interchangeable:
-`status-left` and the window list grow left to right and use **U+E0B0** (solid,
-pointing right), while `status-right` is built with **U+E0B2** / **U+E0B3**
-(pointing left). Icons: U+F179 host, U+F07B dir, U+E0A0 branch, U+F126 worktree,
+carries literals too. It could switch to escapes if a transport strips them,
+which has happened before. Separator direction is per side and not
+interchangeable (docs/gotchas.md #20): `status-left` and the window list use
+**U+E0B0**, `status-right` uses **U+E0B2** / **U+E0B3**. Icons: U+F179 host, U+F07B dir, U+E0A0 branch, U+F126 worktree,
 U+F017 last attached, U+F1DA active since. `tmx-status` falls back to plain text
-labels if a glyph is not exactly one character, and `TMX_GLYPHS=0` forces that
-fallback.
+labels if a glyph arrives empty or as a literal `\u` escape, and `TMX_GLYPHS=0`
+forces that fallback. It does not measure width: see docs/gotchas.md #18.
 
 ## 6. Client-side ssh
 
 `~/.ssh/config` gets a shared block plus two host entries:
 
-- `tmx-remote` → `remote.local` (mDNS, normal use)
-- `tmx-remote-ip` → `192.168.1.10` (reserved static IP, fallback when mDNS
-  misbehaves). Per-network: the reservation lives on one router, so this needs
-  editing on a location change, whereas `remote.local` follows the machine.
+- `remote-box` → `remote.local` (mDNS, normal use)
+- `remote-box-ip` → `192.168.1.10` (reserved static IP, fallback when mDNS
+  misbehaves). Per-network, so it needs editing on a location change
+  (docs/gotchas.md #14).
 
 Both inherit user `youruser`, `ServerAliveInterval 30`, `ServerAliveCountMax 3`,
 `TCPKeepAlive yes`, `ControlMaster auto` with a socket under `~/.ssh/cm` and
@@ -288,13 +284,10 @@ machine's git key and is not involved - only the public half of the laptop's key
 is added to the remote's `authorized_keys`. `AddKeysToAgent yes` for one
 passphrase prompt per agent lifetime.
 
-**No `UseKeychain`.** The option exists only in Apple's ssh, and MacPorts'
-`/opt/local/bin/ssh` precedes `/usr/bin/ssh` on `PATH`; under it, an unknown
-option is a fatal parse error that disables `ssh` and `scp` machine-wide, for
-every host. `IgnoreUnknown UseKeychain` is not an adequate guard - it applies
-only to connections matching the block containing it, so a connection to a raw
-IP or an unrelated host still aborts. Keychain persistence is instead a one-off
-`/usr/bin/ssh-add --apple-use-keychain`.
+**No `UseKeychain`.** Under any non-Apple ssh it is a fatal parse error that
+breaks `ssh` and `scp` machine-wide, and `IgnoreUnknown` does not save you
+(docs/gotchas.md #13 has both measurements). Keychain persistence is instead a
+one-off `/usr/bin/ssh-add --apple-use-keychain`.
 
 The `Host` pattern list includes the raw IP as well as the two aliases, so
 connecting by address by hand still picks up the key, keepalives and connection
@@ -320,17 +313,16 @@ subcommands:
 
 Dispatch logic:
 
-1. **On the client** (hostname ≠ `tmx-remote`): re-exec as `ssh -t tmx-remote
+1. **On the client** (decided as in §12): re-exec as `ssh -t remote-box
    '$SHELL -lc "tmx …"'`. So `tmx code-api` from a local shell lands you inside
    the remote session in one step. Remote host is overridable via
    `TMX_REMOTE_HOST`.
 
-   The `$SHELL -lc` wrapper is required, not cosmetic. Plain `ssh host command`
-   runs a non-interactive, non-login zsh that reads only `~/.zshenv`, so
-   MacPorts' `/opt/local/bin` is absent and `tmux`, `fzf` and `git` appear
-   uninstalled. Going through a login shell also means the tmux server, when
-   this call is what starts it, inherits the real environment rather than a
-   stripped one.
+   The `$SHELL -lc` wrapper is required, not cosmetic: plain `ssh host command`
+   gets a shell without your profile's `PATH`, so `tmux`, `fzf` and `git` look
+   uninstalled (docs/gotchas.md #12). Going through a login shell also means the
+   tmux server, when this call is what starts it, inherits the real environment
+   rather than a stripped one.
 2. **On the remote, outside tmux:** create if needed, then `attach-session`.
 3. **On the remote, inside tmux** (`$TMUX` set): create detached if needed, then
    `switch-client -t` - never a nested attach.
@@ -341,8 +333,13 @@ Dispatch logic:
 tmux-remote/
 ├── README.md                what this is, and why
 ├── LICENSE                  MIT
+├── CHANGELOG.md             what changed, newest first
+├── ROADMAP.md               what is planned
 ├── SPEC.md                  this file: the design, and the reasoning
 ├── INSTALL.md               step by step, both machines
+├── install.sh               does INSTALL.md for you; --both reaches the remote
+├── tests/
+│   └── install-test.sh      installer integration test, needs Docker
 ├── tmux/
 │   ├── remote.tmux.conf     remote: C-b prefix, REMOTE palette, status line
 │   └── client.tmux.conf     client: C-b prefix, CLIENT palette, F12 toggle
@@ -354,7 +351,7 @@ tmux-remote/
 │   └── lint-shell-structure.py   structural checks zsh -n cannot do
 ├── config/
 │   ├── config.example       settings template -> ~/.config/tmx/config
-│   └── roots                picker roots
+│   └── projects             picker roots and aliases
 └── docs/
     ├── tmux-keys.md         keybindings cheatsheet, for a tmux beginner
     ├── tmx-commands.md      the CLI, with worked examples
@@ -373,10 +370,10 @@ is, what detach means, what to do when something looks stuck.
 - `set-clipboard on` with OSC 52, so a copy in the remote tmux lands in the
   client's clipboard. Your terminal has to allow it: in iTerm2 that is Settings
   → General → Selection → "Applications in terminal may access clipboard"; other
-  terminals have an equivalent, and some enable it by default. Nested, the
-  payload makes two hops - the remote's tmux emits it, the client's re-emits to
-  the terminal - which works, but is where a large selection is most likely to
-  be truncated.
+  terminals have an equivalent, and some enable it by default. When nested, the
+  payload makes two hops: the remote's tmux emits it, the client's tmux re-emits
+  it to the terminal. That works, but it is where a large selection is most
+  likely to be truncated.
 - **Clipboard file bridge**, for selections too big for OSC 52. `Y` in copy mode
   on the remote writes the selection to `~/.cache/tmx/clip.txt` and reports the
   size; `tmx clip` on the client fetches it over ssh onto the local clipboard;
@@ -390,13 +387,10 @@ is, what detach means, what to do when something looks stuck.
 - Config lives at `~/.config/tmux/tmux.conf` on each machine (XDG). Existing
   files are backed up, not overwritten.
 - `default-command` deliberately left **empty**, which is what makes tmux start
-  each pane as an interactive *login* shell - so panes read `/etc/zprofile`,
-  `~/.zprofile` and `~/.zshrc` and have the full environment. Verified by
-  inspection: `$0` in a pane is `-zsh`, with the leading dash marking a login
-  shell. Setting `default-command` at all would silently downgrade this.
-- `tmx-status` sets its own `PATH`. tmux executes `#()` status commands itself,
-  with no shell profile in between, so this is the only place that environment
-  can be fixed.
+  each pane as an interactive *login* shell with the full environment
+  (docs/gotchas.md #8). Setting it at all would silently downgrade this.
+- `tmx-status` sets its own `PATH`: tmux runs `#()` commands with no shell
+  profile in between (docs/gotchas.md #12).
 
 ## 10. Explicitly out of scope
 
@@ -430,7 +424,7 @@ because each one constrains the code.
 
 1. `TMX_ROLE=remote` in the environment, or
 2. the marker file `~/.config/tmx/remote` existing, or
-3. `hostname -s` matching `TMX_REMOTE_NAME` (default `tmx-remote`),
+3. `hostname -s` matching `TMX_REMOTE_NAME` (default `remote-box`),
    case-insensitive.
 
 The marker file is created on the remote during install, so the logic never

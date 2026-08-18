@@ -5,13 +5,13 @@ Open this any time with `prefix /`, or `tmx help cmds` from a shell.
 ## What it is
 
 `tmx` gives you one tmux session per work directory on the remote machine. The
-session name is derived from the directory, so you never have to remember
-whether a session exists: the same directory always produces the same name, and
-`tmx` creates it or attaches to it as needed.
+session name comes from the directory, and the same directory always produces
+the same name. So you never have to remember whether a session exists: `tmx`
+creates it or attaches to it as needed.
 
 Installed on **both** machines. On the client it forwards itself over ssh, so
 `tmx code-api` typed on the laptop lands you inside the remote session in one
-step - no separate `ssh tmx-remote` first.
+step - no separate `ssh remote-box` first.
 
 ## Commands
 
@@ -76,7 +76,7 @@ That gives you:
 - a worktree marker in the status line, so you can tell at a glance that you are
   not in the main checkout
 
-If the branch already exists it is checked out. If it does not, it is created.
+If the branch already exists, `tmx` checks it out. If it does not, `tmx` creates it.
 Run the same command again later and you just attach - the worktree is reused.
 Works from inside another worktree too; `tmx` finds the main repo either way.
 
@@ -125,9 +125,9 @@ TMX_AI_aider=aider --no-auto-commits
 Agent names are letters, digits and underscore, because the name is also used as
 the tmux window name.
 
-If the agent is not found, `tmx` warns but still opens the window - the window
-runs through a login shell, whose PATH is wider than `tmx`'s own, so it may work
-anyway. If the window vanishes immediately, that warning was right.
+If the agent is not found, `tmx` warns but still opens the window. The window runs
+through a login shell, and its PATH is wider than `tmx`'s own, so the agent may
+work anyway. If the window vanishes immediately, that warning was right.
 
 ### Adding one later
 
@@ -147,15 +147,15 @@ Details worth knowing:
 - Asking for the **same** agent twice never gives you two windows.
 - You stay on your shell window. Adding an agent does not move you.
 - The window goes to index 2 when that index is free. If you already made a
-  window 2 yourself, the agent window is appended at the end instead, so your
-  windows are not renumbered underneath you.
+  window 2 yourself, the agent window goes to the end instead, so your windows
+  keep their numbers.
 - The shell and the agent always share one working directory. There is no way
   for them to end up in different places.
 - Quitting the agent closes its window and `tmx` does not bring it back. Run
   `tmx --ai <name>` again if you want it.
 
 Apart from adding an agent window on request, `tmx` never restructures a
-session, so it is safe to run against one you have rearranged.
+session, so it is safe to run on a session you have rearranged.
 
 ## The picker
 
@@ -168,14 +168,14 @@ Run `tmx` with no arguments, or press `prefix f`.
   code-notes                  ~/code/notes
 ```
 
-Live sessions come first, with when they were last attached; then work dirs that
+Live sessions come first, each with its last-attached time; then work dirs that
 have no session yet. Type to filter, `Enter` to open, `Esc` to cancel. The
 preview pane on the right shows the session's windows, or the directory's git
 status and recent commits.
 
-The first two lines above are live sessions that were opened by path, which is
-why they show up even though they sit two levels below a root. Only the bottom
-group is limited by your roots.
+The first two lines above are live sessions that were opened by path. That is why
+they appear even though they sit two levels below a root. Only the bottom group is
+limited by your roots.
 
 ## The projects file
 
@@ -190,15 +190,14 @@ There are exactly two kinds of line:
 webapi = ~/code/acme/webapi  an ALIAS. Has "=". Names one directory.
 ```
 
-Blank lines and `#` comments are ignored. A leading `~` is expanded. If a line
-before the `=` looks like a path, it is read as a root, so a directory whose name
-contains `=` still works.
+Blank lines and `#` comments are ignored. A leading `~` is expanded. If the text
+before the `=` looks like a path, the line is read as a root, so a directory whose
+name contains `=` still works.
 
 ### What a root is
 
 **A root is a container. Its children are offered; the root itself is not, and
-nothing deeper than one level is.** One line per root, `#` for comments, a leading
-`~` is expanded.
+nothing deeper than one level is.**
 
 Given this on disk:
 
@@ -241,8 +240,8 @@ its parent's listing. This is the rule that surprises people:
 
 It applies at every level. Adding `~/code/acme` as a root gains you `acme-api` and
 `acme-web`, and costs you `code-acme`, because `acme` is no longer offered by
-`~/code`. That is a trade rather than an improvement, so add a container as a root
-only when you work inside its children rather than in the container itself.
+`~/code`. That is a trade, not an improvement. Add a container as a root only when you work
+inside its children, not in the container itself.
 
 ### Three layouts
 
@@ -284,19 +283,17 @@ machine you are not on right now.
 
 ## Short names, and how deep you can go
 
-**Any path works, at any depth, root or no root.** Roots only decide
-what the picker shows you:
+**Any path works, at any depth, root or no root:**
 
 ```sh
 tmx ~/code/acme/services/billing/api     # opens, as session billing-api
 ```
 
 A session name is always **the last two path components**, so a deep path does not
-give you a long name. The flip side is that two directories sharing their last two
-components want the same name; `tmx` notices and refuses rather than putting you in
-the wrong one.
+give you a long name. The downside: two directories sharing their last two
+components want the same name. `tmx` notices and refuses, as above.
 
-There are three ways to type less:
+There are four ways to open a session:
 
 | you type | works when | you get |
 |---|---|---|
@@ -305,8 +302,8 @@ There are three ways to type less:
 | `tmx ~/deep/path` | always | session from the last two components |
 | `tmx current-project` | an alias is defined for it | a session named `current-project` |
 
-The middle one is the useful one day to day: **the bare directory name is enough**
-as long as a root covers it. `tmx api` finds `~/code/api` and opens `code-api`.
+`tmx api` is the useful one day to day: **the bare directory name is enough** as
+long as a root covers it. It finds `~/code/api` and opens `code-api`.
 
 For anything a root does not cover, give it a name of your own; see below.
 
@@ -388,15 +385,14 @@ pane.
 
 Note that quitting an agent does not leave its window sitting there with a shell
 in it. The window runs `zsh -lc <agent>`, so when the agent exits the shell
-exits too and the window closes. It simply disappears from the list, and `tmx
---ai <name>` puts it back.
+exits too and the window closes. It simply disappears from the list.
 
 ## Moving big text between the machines
 
 Ordinary copies cross by themselves: select in the remote tmux and it lands on
-the client's clipboard over ssh, via OSC 52. That breaks down for large
-selections - escape sequences get truncated, and doubly so when a local tmux is
-in the middle.
+the client's clipboard over ssh, via OSC 52. That stops working for large
+selections: escape sequences get truncated, and a local tmux in the middle adds a
+second limit.
 
 `tmx clip` is the file bridge for those cases.
 
@@ -410,7 +406,7 @@ tmx clip scp             # or print the scp line, to get the file itself
 ```
 
 **client → remote.** For pasting something large into a remote pane, where ⌘V
-would be typed in character by character:
+would type it in character by character:
 
 ```sh
 tmx clip push            # sends this clipboard to the remote
@@ -442,12 +438,12 @@ calls, or one pass through the picker.
 
 ## Environment variables
 
-Nothing needs setting; these exist for when something is off.
+Nothing needs setting; these exist for when something is wrong.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TMX_REMOTE_HOST` | `tmx-remote` | ssh host alias to forward to |
-| `TMX_REMOTE_NAME` | `tmx-remote` | what `hostname -s` prints on the remote |
+| `TMX_REMOTE_HOST` | `remote-box` | ssh host alias to forward to |
+| `TMX_REMOTE_NAME` | `remote-box` | the remote's own hostname, not the ssh alias above |
 | `TMX_ROLE` | - | set to `remote` to force remote behaviour |
 | `TMX_AI_DEFAULT` | `claude` | which agent plain `--ai` runs |
 | `TMX_AI_<agent>` | the agent's own name | command line for that agent |
@@ -456,7 +452,7 @@ Nothing needs setting; these exist for when something is off.
 | `TMX_GLYPHS` | `1` | set to `0` for a plain-text status line |
 | `TMX_CLIP_FILE` | `~/.cache/tmx/clip.txt` | where `Y` saves a big selection |
 
-If mDNS is being unreliable, `TMX_REMOTE_HOST=tmx-remote-ip tmx …` goes straight
+If mDNS is unreliable, `TMX_REMOTE_HOST=remote-box-ip tmx …` goes straight
 to the remote's reserved IP. Note that address is per-network - if you have
 changed location, `~/.ssh/config` may need updating before the fallback works.
 
@@ -464,7 +460,7 @@ changed location, `~/.ssh/config` may need updating before the fallback works.
 
 ### The status line shows boxes or question marks
 
-The glyphs are being sent correctly; the font in **this** terminal has no Nerd
+The glyphs are sent correctly; the font in **this** terminal has no Nerd
 Font coverage. Check it:
 
 ```sh
@@ -473,35 +469,33 @@ printf '\ue0b0 \ue0b2 \ue0b3 \ue0a0 \uf179 \uf07b \uf126 \uf017 \uf1da\n'
 
 You should see nine icons: two solid arrows, a thin arrow, a branch, an apple, a
 folder, a fork, a clock and a history arrow. Boxes, question marks or blank
-space mean the font selected in that terminal has no Nerd Font glyphs -- the
-status line will show the same boxes. Note the check has to be run **in the
-terminal you actually use**, and on **both** machines, since the remote's own
-screen renders the same status line.
+space mean that font has no Nerd Font glyphs, and the status line shows the same
+boxes. Run the check **in the terminal you actually use**, and on **both**
+machines, since the remote's own screen renders the same status line.
 
 Fix it by selecting a Nerd Font in the terminal's profile, or set `TMX_GLYPHS=0`
-in `~/.config/tmx/config` for plain-text labels. A copy of the font existing on
-the other machine does not help: whichever terminal you are looking at is the
-one that has to render it.
+in `~/.config/tmx/config` for plain-text labels. Installing the font on the other
+machine does not help: the terminal you are looking at has to render it.
 
 **`tmx` on the laptop hangs, then times out.** The remote is not reachable by
-name. Try `TMX_REMOTE_HOST=tmx-remote-ip tmx ls`.
+name. Try `TMX_REMOTE_HOST=remote-box-ip tmx ls`.
 
 **`tmx` on the remote tries to ssh to itself.** Role detection failed. Check
 that `~/.config/tmx/remote` exists; `touch` it if not.
 
 **`tmux not found` / `git not found` even though they are installed.** A `PATH`
 problem, not a missing package. Plain `ssh host command` runs a non-interactive,
-non-login zsh that reads only `~/.zshenv`, so MacPorts' `/opt/local/bin` -
-usually exported from `~/.zprofile` or `~/.zshrc` - is absent. `tmx` forwards
+non-login zsh that reads only `~/.zshenv`. So MacPorts' `/opt/local/bin` (usually
+exported from `~/.zprofile` or `~/.zshrc`) is absent. `tmx` forwards
 itself through `$SHELL -lc` to avoid this, so if you still see it, the copy on
 the remote is out of date. Compare:
 
 ```sh
-ssh tmx-remote 'echo $PATH'                  # the thin one
-ssh tmx-remote '$SHELL -lc "echo \$PATH"'    # what tmx actually uses now
+ssh remote-box 'echo $PATH'                  # the thin one
+ssh remote-box '$SHELL -lc "echo \$PATH"'    # what tmx actually uses now
 ```
 
-Belt and braces, and worth doing anyway, since `~/.zshenv` is the only zsh
+Not strictly needed, but worth doing anyway, since `~/.zshenv` is the only zsh
 startup file read by *every* shell:
 
 ```sh
@@ -518,9 +512,6 @@ that do not exist.
 **`session name '…' is already taken`.** Two directories produced the same
 session name. The message prints both paths. Attach to the existing one by name,
 or rename a directory.
-
-**Boxes instead of icons in the status bar.** The terminal is not using a Nerd
-Font. Fix the font, or run with `TMX_GLYPHS=0`.
 
 **The status bar's right side says `not ready` for a moment after attaching.**
 Expected. tmux prints that placeholder until `tmx-status` has run once. If it

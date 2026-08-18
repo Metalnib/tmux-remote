@@ -1,29 +1,47 @@
 # =====================================================================
-# ssh config for the client -- merge into ~/.ssh/config
+# ssh config for the client - merge into ~/.ssh/config
 #
-# `tmx-remote`    normal use, resolved over mDNS
-# `tmx-remote-ip` same machine by reserved static IP, for when mDNS misbehaves
+# `remote-box`    normal use, resolved over mDNS
+# `remote-box-ip` same machine by reserved static IP, for when mDNS misbehaves
 #
 # Written for a LAN, since that is what it was tested on. tmx itself does not
-# care -- a public address, a VPN or a jump host all work; adjust the HostName and
+# care - a public address, a VPN or a jump host all work; adjust the HostName and
 # the AddressFamily line below to suit. Key auth, and no agent forwarding: the
 # remote holds its own git keys.
+#
+# AFTER PASTING THIS IN, EDIT THE TWO LINES MARKED "# EDIT ME":
+#   User      your username on the remote          (block 1, the shared one)
+#   HostName  the remote's address                 (block 2, `Host remote-box`)
+# The `Host remote-box-ip` block at the bottom is an optional fallback for when
+# name lookup fails. Ignore it, or point it at a fixed address.
+#
+# The IdentityFile below is a key you create yourself, before any of this works:
+#   ssh-keygen -t ed25519 -f ~/.ssh/client_to_remote_ed25519
+#   ssh-copy-id -i ~/.ssh/client_to_remote_ed25519.pub remote-box
 # =====================================================================
 
-# The raw IP is listed too, so typing `youruser@192.168.1.10` by hand still picks up
-# the key, keepalives and connection sharing rather than falling back to
-# defaults. Update it alongside the HostName below if the network changes.
-Host tmx-remote tmx-remote-ip 192.168.1.10
-    User youruser
+# BLOCK 1 of 2: the settings both names share. No HostName here on purpose, that
+# belongs in block 2. The raw IP is listed as well. So if you type
+# `youruser@192.168.1.10` by hand, you still get the key, the keepalives and the
+# connection sharing, instead of ssh defaults. Update that IP together with the
+# HostName below if the network changes.
+Host remote-box remote-box-ip 192.168.1.10
+    User youruser                 # EDIT ME: your username on the remote
 
     # This laptop's key for reaching the remote, and nothing else. Named for
     # the direction it works in, so it is obvious what it is when you read
     # the remote's authorized_keys later. Unrelated to the remote's own
     # ~/.ssh/id_ed25519, which is that machine's git key.
+    #
+    # Create it before first use, or every connection here fails with
+    # "no such identity":
+    #   ssh-keygen -t ed25519 -f ~/.ssh/client_to_remote_ed25519
     IdentityFile ~/.ssh/client_to_remote_ed25519
 
     # Offer only the key named above. Without this, ssh presents every key
-    # in the agent, which can trip a server's MaxAuthTries.
+    # in the agent, which can trip a server's MaxAuthTries. Note the pairing:
+    # with IdentitiesOnly set, a key you already use elsewhere will NOT be
+    # tried here, so the IdentityFile above really does have to exist.
     IdentitiesOnly yes
 
     # If the key has a passphrase, add it to the agent on first use so you are
@@ -31,10 +49,10 @@ Host tmx-remote tmx-remote-ip 192.168.1.10
     # Apple's ssh and MacPorts' OpenSSH.
     AddKeysToAgent yes
 
-    # Deliberately NOT using UseKeychain here. It exists only in Apple's ssh,
-    # and MacPorts' /opt/local/bin/ssh shadows /usr/bin/ssh on PATH -- under
-    # which the option is a FATAL parse error that breaks every ssh and scp on
-    # this machine, including ones aimed at unrelated hosts.
+    # Deliberately NOT using UseKeychain here. Only Apple's ssh knows that
+    # option. MacPorts' /opt/local/bin/ssh shadows /usr/bin/ssh on PATH, and
+    # under that ssh the option is a FATAL parse error. It breaks every ssh and
+    # scp on this machine, including ones aimed at other hosts.
     #
     # IgnoreUnknown is not a fix: it only applies where it is in scope, so a
     # connection that does not match this Host block still hits the error.
@@ -51,6 +69,7 @@ Host tmx-remote tmx-remote-ip 192.168.1.10
     # Reuse one TCP connection for repeated `tmx` calls, so the second
     # invocation does not pay for another handshake.
     ControlMaster auto
+    # Create this directory yourself, ssh will not: mkdir -p ~/.ssh/cm
     ControlPath ~/.ssh/cm/%r@%h:%p
     ControlPersist 10m
 
@@ -64,14 +83,15 @@ Host tmx-remote tmx-remote-ip 192.168.1.10
     AddressFamily inet
     Compression no
 
-# Prefer this one. mDNS follows the machine, so it keeps working when either
+# BLOCK 2 of 2: where the name actually points. This is the one to edit.
+# Prefer this name: mDNS follows the machine, so it keeps working when either
 # machine moves to a different network.
-Host tmx-remote
-    HostName remote.local
+Host remote-box
+    HostName remote.local         # EDIT ME: the remote's address
 
 # Fallback for when mDNS is misbehaving. NOTE: this address is specific to one
-# network -- the DHCP reservation only exists on that router. Update it when you
+# network - the DHCP reservation only exists on that router. Update it when you
 # change location, or it will be silently wrong exactly when you need it.
 # Current: home/office network as of 2026-08-05.
-Host tmx-remote-ip
+Host remote-box-ip
     HostName 192.168.1.10

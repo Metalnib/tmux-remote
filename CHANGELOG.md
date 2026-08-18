@@ -3,8 +3,79 @@
 Versions match `TMX_VERSION` in `bin/tmx`, which `tmx version` prints for both
 machines along with a content hash.
 
-Not released yet. Everything below describes the pre-release history of the two
-scripts, newest first.
+Install script. Better instructions.
+
+## 2026-08-18
+
+**Added**
+
+- `tests/install-test.sh`: Docker integration test for the installer. Fifteen
+  checks, from missing-dependency messages up to `--both` across two containers
+  over real ssh, ending with a session created remotely by a plain `tmx <name>`.
+  Part 2 appends the shipped `ssh/config.client`, edits the two `# EDIT ME` lines
+  and connects by the nickname it defines, so the documented install path is what
+  gets tested.
+- `install.sh`: one command per machine, or `--both --remote-host=NAME` from the
+  client to do the pair. Checks dependencies per role, derives
+  `TMX_PATH_PREPEND`, migrates a legacy `roots` file and a legacy `~/.tmux.conf`,
+  checks font glyph coverage, never overwrites an edited `config` or `projects`,
+  and proves the round trip with `tmx version`. `--dry-run` and `--uninstall`
+  included.
+
+**Changed**
+
+- Renamed the SSH alias from tmx-remote to remote-box; TMX_REMOTE_HOST now defaults to remote-box.
+- README: clarified the alias, shortened install steps, and noted existing behaviour around project-directory seeding and unknown names.
+- config/config.example: clarified that TMX_REMOTE_NAME is a hostname, not an SSH alias.
+- Docs: tightened wording, fixed tense usage, and removed duplicated or awkward phrasing.
+
+**Fixed**
+
+- `SPEC.md` said the status line falls back to plain text when a glyph "is not
+  exactly one character". That was the behaviour before 2026-08-05.9;
+  `tmx-status` tests for a glyph that arrives empty or as a literal `\u` escape,
+  because a character count depends on the locale.
+- `SPEC.md`'s file tree listed `config/roots`, which has not existed since roots
+  and aliases merged into `config/projects`. The tree was also missing
+  `CHANGELOG.md` and `ROADMAP.md`.
+- `install.sh` only warned when `~/.local/bin` was not on `PATH`, so the next
+  documented step, `tmx version`, failed with "command not found". It now adds
+  the line to `~/.zshenv` itself.
+- Docs claimed `tmux`, `fzf` and `git` are needed on both machines. The client
+  forwards over ssh before any of them run: it needs `zsh` and `ssh`, tmux only
+  for optional local sessions.
+- `SPEC.md` had the `tmx wt` arguments in the wrong order.
+
+## 2026-08-06.4
+
+**Fixed**
+
+- **`tmx ls`, the picker and the status line showed wrong values on tmux 3.5a.**
+  tmux escapes control bytes in format output, so the tab delimiter arrived as
+  `_` and a whole record came back as a single field: `DIR` showed the entire
+  record, `LAST ATTACHED` and `UP` showed ages in the thousands of days, and the
+  status line lost its directory, branch and uptime. Records now use a printable
+  delimiter with the one field that may contain it last, and a session's
+  directory is looked up per session so it stays exact. Measured as correct on
+  3.5a and 3.7b, including a directory named `odd|dir` and a window named
+  `odd|winname`.
+- **A second name for a directory opened a duplicate session on tmux 3.5a.** The
+  one-session-per-directory guard read the same collapsed record, so it never
+  matched and an alias re-opened a directory that was already running.
+- `tmx ls` died with "command not found: column" on a machine without
+  `column(1)`, which minimal Linux images do not ship. It falls back to
+  unaligned output. `install.sh` reports `column` as optional.
+- `bin/lint-shell-structure.py` treated the opening quote of a nested string
+  inside `$( )` as closing the outer one, then read every following `#` as a
+  comment, and reported an unclosed quote that `zsh -n` accepts.
+
+**Added**
+
+- `bin/lint-shell-structure.py` rejects a tab used as a delimiter inside a tmux
+  `-F` format.
+- `tests/install-test.sh` checks that `tmx ls` reports a real directory, keeps
+  its columns aligned to the right fields when a value contains the delimiter,
+  and still refuses a duplicate session for one directory.
 
 ## 2026-08-06.2
 
